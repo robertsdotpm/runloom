@@ -123,6 +123,29 @@ static void runloom_gcframes_anchor_dealloc(PyObject *self)
     Py_TYPE(self)->tp_free(self);
 }
 
+/* gc.callbacks hook (AM-8): at the "start" of every collection, clear the FROZEN
+ * bit gc.freeze() may have stamped on the anchor, so the anchor always
+ * participates and parked frames stay visible.  Signature is gc's
+ * callback(phase, info); we only act on "start".  Errors are swallowed (a GC
+ * callback must not raise). */
+static PyObject *runloom_gcframes_gc_callback(PyObject *self, PyObject *args)
+{
+    PyObject *phase = NULL, *info = NULL;
+    (void)self;
+    if (PyArg_UnpackTuple(args, "runloom_gc_frames_start", 0, 2, &phase, &info)
+        && phase != NULL && PyUnicode_Check(phase)
+        && PyUnicode_CompareWithASCIIString(phase, "start") == 0
+        && runloom_gcframes_anchor != NULL) {
+        runloom_gc_anchor_keep_thawed(runloom_gcframes_anchor);
+    }
+    Py_RETURN_NONE;
+}
+
+static PyMethodDef runloom_gcframes_gc_callback_def = {
+    "runloom_gc_frames_start", runloom_gcframes_gc_callback, METH_VARARGS,
+    "Internal: keep the runloom GC frames anchor un-frozen across gc.freeze()."
+};
+
 static PyTypeObject RunloomGCFramesAnchorType = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name      = "runloom_c.gc_frames_anchor",
@@ -184,6 +207,26 @@ static int runloom_gcframes_init(PyObject *m)
      * without depending on the by-refcount root pass.  Non-fatal if it fails. */
     if (PyModule_AddObjectRef(m, "gc_frames_anchor", anchor) < 0) {
         PyErr_Clear();
+    }
+    /* AM-8: register a gc "start" callback that keeps the anchor un-frozen, so a
+     * user's gc.freeze() (e.g. a prefork server's copy-on-write setup) cannot
+     * silently reopen the crash.  Non-fatal if gc / its callbacks list is
+     * unavailable -- the anchor still works for programs that never freeze. */
+    {
+        PyObject *gc = PyImport_ImportModule("gc");
+        if (gc != NULL) {
+            PyObject *callbacks = PyObject_GetAttrString(gc, "callbacks");
+            if (callbacks != NULL && PyList_Check(callbacks)) {
+                PyObject *cb = PyCFunction_New(&runloom_gcframes_gc_callback_def, NULL);
+                if (cb != NULL) {
+                    if (PyList_Append(callbacks, cb) < 0) PyErr_Clear();
+                    Py_DECREF(cb);
+                }
+            }
+            Py_XDECREF(callbacks);
+            Py_DECREF(gc);
+        }
+        if (PyErr_Occurred()) PyErr_Clear();
     }
     runloom_gcframes_on = 1;
     return 0;

@@ -432,6 +432,22 @@ int runloom_gcvisit_cstack_chain(void *head, visitproc visit, void *arg, int sub
     return 0;
 }
 
+/* AM-8: keep the anchor un-frozen.  gc.freeze() stamps EVERY tracked object with
+ * _PyGC_BITS_FROZEN, and the free-threaded collector skips frozen objects in its
+ * heap walk / mark passes -- so once frozen, the anchor's tp_traverse would stop
+ * running and parked-fiber frames would silently become invisible again,
+ * reopening the crash for any deferred-only referent created AFTER the freeze
+ * (which is itself not frozen and thus collectible).  A gc "start" callback calls
+ * this each collection to clear the bit, so the anchor always participates.
+ * (greenlet 3.15 has the same freeze hole; this closes it for runloom.)  No-op if
+ * the object is not frozen. */
+void runloom_gc_anchor_keep_thawed(PyObject *op)
+{
+    if (op != NULL && _PyObject_HAS_GC_BITS(op, _PyGC_BITS_FROZEN)) {
+        _PyObject_CLEAR_GC_BITS(op, _PyGC_BITS_FROZEN);
+    }
+}
+
 #else   /* non-FT / pre-3.14: safe stubs so callers stay unconditional */
 
 int runloom_gc_world_stopped(void) { return 0; }
@@ -440,5 +456,6 @@ int runloom_gcvisit_frame_chain(void *top, visitproc visit, void *arg, int subtr
 { (void)top; (void)visit; (void)arg; (void)subtract; return 0; }
 int runloom_gcvisit_cstack_chain(void *head, visitproc visit, void *arg, int subtract)
 { (void)head; (void)visit; (void)arg; (void)subtract; return 0; }
+void runloom_gc_anchor_keep_thawed(PyObject *op) { (void)op; }
 
 #endif  /* RUNLOOM_GCFRAMES_HAVE */

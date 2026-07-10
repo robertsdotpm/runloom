@@ -166,6 +166,11 @@ int runloom_gcvisit_frame_chain(void *top, visitproc visit, void *arg, int subtr
  * Same contract as runloom_gcvisit_frame_chain. */
 int runloom_gcvisit_cstack_chain(void *cstack_head, visitproc visit, void *arg, int subtract);
 
+/* Clear the _PyGC_BITS_FROZEN bit on `op` (the anchor) so gc.freeze() cannot
+ * stop it from making parked frames GC-visible.  Called from a gc "start"
+ * callback each collection.  No-op on non-core builds / if not frozen. */
+void runloom_gc_anchor_keep_thawed(PyObject *op);
+
 #ifdef __cplusplus
 }
 #endif
