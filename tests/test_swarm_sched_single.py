@@ -867,7 +867,10 @@ import runloom, runloom_c
 runloom.inspect.install_crash_handler("on")
 def body():
     runloom_c._crash_selftest_overflow()   # unbounded real-C recursion
-runloom_c.fiber(body, 64 * 1024)              # pin a small 64 KiB stack
+# 256 KiB: honored exactly on both 3.13 (16 KiB floor) and FT-3.14 (256 KiB
+# floor, the p226 fix in 289ecb99); a smaller pin would be clamped up there
+# and the classifier would name the clamped size.
+runloom_c.fiber(body, 256 * 1024)
 runloom_c.run()
 '''
     p = _subproc(script, timeout=30)
@@ -876,7 +879,7 @@ runloom_c.run()
     assert "GOROUTINE STACK OVERFLOW" in p.stderr, (
         "overflow not classified (silent corruption?)\nrc=%r\n%s" % (p.returncode, p.stderr))
     assert "guard page" in p.stderr, p.stderr
-    assert "64 KiB" in p.stderr, p.stderr
+    assert "256 KiB" in p.stderr, p.stderr
 
 
 # ==========================================================================

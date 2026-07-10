@@ -416,7 +416,10 @@ def test_select_mn_send_integrity_stress():
 # --- learned path: a SECOND spawn of a sampled kind sizes to the learned peak,
 #     SHRINKING from the large autosize start once a sample exists. ---
 _ADVICE_LEARNED = r'''
-import sys; sys.path.insert(0, "src")
+import sys, os; sys.path.insert(0, "src")
+# Start above the FT-3.14 256 KiB spawn floor (p226, 289ecb99): at the default
+# 256 KiB start the floor equals the start there, so nothing could shrink.
+os.environ["RUNLOOM_STACK_AUTOSIZE_START"] = str(1024 * 1024)
 import runloom, runloom_c as rc
 rc.enable_stack_autosize(True, False)   # autosize ON, prescan OFF
 
@@ -452,9 +455,10 @@ def test_stackadvice_learned_size_shrinks_from_start():
     f = dict(kv.split("=") for kv in learned[0][len("LEARNED "):].split())
     # both rounds folded into one kind (8 samples)
     assert int(f["samples"]) == 8, learned[0]
-    # the learned reserved size SHRANK below the 256 KiB autosize start: round-2
-    # spawns sized to the observed (shallow) peak, not the cold default.
-    assert int(f["reserved"]) < 256 * 1024, (
+    # the learned reserved size SHRANK below the 1 MiB autosize start (set in
+    # the snippet, above the FT-3.14 spawn floor): round-2 spawns sized to the
+    # observed (shallow) peak, not the cold default.
+    assert int(f["reserved"]) < 1024 * 1024, (
         "learned size did not shrink from the autosize start: " + learned[0])
     reset = [l for l in p.stdout.splitlines() if l.startswith("RESET ")]
     assert reset and reset[0] == "RESET entries=0", (p.stdout[-400:],)

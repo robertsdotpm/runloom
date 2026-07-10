@@ -29,6 +29,10 @@ def _run(snippet, sysmon_ms=20, timeout=90):
     env = dict(os.environ)
     env["PYTHONPATH"] = "src"
     env["RUNLOOM_SYSMON_MS"] = str(sysmon_ms)
+    # WEDGED/RECOVERED stderr lines are the oracle here, and since b9221d8e
+    # sysmon logs them only on explicit opt-in (quiet when it runs solely to
+    # service preemption) -- so opt in.
+    env["RUNLOOM_SYSMON"] = "1"
     env.setdefault("PYTHON_GIL", "0")
     p = subprocess.run([sys.executable, "-c", snippet],
                        capture_output=True, text=True, timeout=timeout, env=env)

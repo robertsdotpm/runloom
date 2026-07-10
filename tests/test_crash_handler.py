@@ -126,12 +126,15 @@ def test_overflow_classified_single_thread():
         runloom.inspect.install_crash_handler("on")
         def boom():
             runloom_c._crash_selftest_overflow()   # unbounded real-C recursion
-        runloom_c.fiber(boom, 16384)                  # small 16 KiB stack
+        # 256 KiB is honored exactly on both 3.13 (16 KiB floor) and FT-3.14
+        # (256 KiB floor, the p226 fix in 289ecb99) -- a sub-floor size would
+        # be clamped up and the classifier would name the clamped size.
+        runloom_c.fiber(boom, 256 * 1024)
         runloom_c.run()
     """)
     assert rc in FAULT_RCS, (rc, out)          # chained to default -> cored
     assert "GOROUTINE STACK OVERFLOW" in out, out
-    assert "16 KiB" in out, out                       # named its stack size
+    assert "256 KiB" in out, out                      # named its stack size
     assert "fiber g" in out, out
     assert "=== runloom fiber dump" in out, out   # full registry dump too
 

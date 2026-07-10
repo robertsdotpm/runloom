@@ -49,6 +49,19 @@ def light():
 
 START = 256 * 1024          # default RUNLOOM_STACK_AUTOSIZE_START
 
+# Spawn-time stack floor: on free-threaded 3.14 every fiber stack is clamped up
+# to 256 KiB (RUNLOOM_FT314_MIN_STACK_SIZE, the p226 fix in 289ecb99 -- see
+# runloom_sched.h); elsewhere the auto-sizer's own 16 KiB floor is what shows.
+# Since the FT-3.14 floor EQUALS the default start, the learn-down tests below
+# raise the start above the floor (RUNLOOM_STACK_AUTOSIZE_START) so that
+# "start large, learn down" stays observable on the primary target.
+import sys as _floor_sys
+import sysconfig as _floor_sysconfig
+_FT314 = (bool(_floor_sysconfig.get_config_var("Py_GIL_DISABLED"))
+          and _floor_sys.version_info >= (3, 14))
+FLOOR = 256 * 1024 if _FT314 else 16 * 1024
+BIG_START = 1024 * 1024     # a learn-down start comfortably above both floors
+
 
 @pytest.fixture(autouse=True)
 def _clean():
@@ -111,30 +124,37 @@ def test_unseen_kind_starts_large():
     assert _row(heavy)["reserved"] == START
 
 
-def test_learn_down_on_next_batch():
+def test_learn_down_on_next_batch(monkeypatch):
+    # Start above the FT-3.14 spawn floor so the learned size is smaller than
+    # the start and the shrink is observable (at the default 256 KiB start the
+    # floor equals the start there and nothing can shrink).
+    monkeypatch.setenv("RUNLOOM_STACK_AUTOSIZE_START", str(BIG_START))
     runloom.inspect.enable_stack_autosize(True)
     _batch([heavy], 30)                       # batch 1: all start large
-    assert _row(heavy)["reserved"] == START
+    assert _row(heavy)["reserved"] == BIG_START
     hwm = _row(heavy)["max_hwm"]
     _batch([heavy], 30)                       # batch 2: start at the learned size
     learned = _row(heavy)["reserved"]
-    assert learned < START                    # shrank from the large start
+    assert learned < BIG_START                # shrank from the large start
     assert learned >= hwm                     # but still covers what it used
     assert (learned & (learned - 1)) == 0     # power of two
 
 
-def test_light_kind_learns_down_to_floor():
+def test_light_kind_learns_down_to_floor(monkeypatch):
+    monkeypatch.setenv("RUNLOOM_STACK_AUTOSIZE_START", str(BIG_START))
     runloom.inspect.enable_stack_autosize(True)
     _batch([light], 20)                       # batch 1: start large
     _batch([light], 20)                       # batch 2: learned
     learned = _row(light)["reserved"]
-    assert learned == 16 * 1024               # ~0 use -> the 16 KiB floor
+    assert learned == FLOOR                   # ~0 use -> all the way to the floor
 
 
 def test_explicit_stack_size_wins():
+    # 1 MiB: above both stack floors and distinct from START and the 512 KiB
+    # program default, so "reserved == it" can only mean the pin was honored.
     runloom.inspect.enable_stack_autosize(True)
-    _batch([heavy], 20, stack=128 * 1024)     # explicit override
-    assert _row(heavy)["reserved"] == 128 * 1024   # autosizer did not touch it
+    _batch([heavy], 20, stack=1024 * 1024)    # explicit override
+    assert _row(heavy)["reserved"] == 1024 * 1024  # autosizer did not touch it
 
 
 def pinned_worker():
@@ -150,12 +170,14 @@ def test_friendly_fiber_honors_stack_size():
 
     def main():
         runloom.inspect.enable_stack_advice(True)
-        runloom.fiber(pinned_worker, stack_size=128 * 1024)
+        # 1 MiB: above the FT-3.14 256 KiB spawn floor (p226, 289ecb99) and
+        # distinct from the 512 KiB default, so the value is unmistakably the pin.
+        runloom.fiber(pinned_worker, stack_size=1024 * 1024)
         runloom.sleep(0.02)
         out["reserved"] = _row(pinned_worker)["reserved"]
 
     runloom.run(4, main)
-    assert out["reserved"] == 128 * 1024
+    assert out["reserved"] == 1024 * 1024
 
 
 def crypto_with_arg(x):
@@ -192,10 +214,12 @@ def test_friendly_fiber_with_args_preserves_kind_and_prescan():
 
 
 def test_env_start_size(monkeypatch):
-    monkeypatch.setenv("RUNLOOM_STACK_AUTOSIZE_START", str(64 * 1024))
+    # 2 MiB: above the FT-3.14 spawn floor and distinct from START and the
+    # 512 KiB default, so seeing it proves the env override was read.
+    monkeypatch.setenv("RUNLOOM_STACK_AUTOSIZE_START", str(2 * 1024 * 1024))
     runloom.inspect.enable_stack_autosize(True)   # reads the env at enable time
     _batch([heavy], 10)
-    assert _row(heavy)["reserved"] == 64 * 1024
+    assert _row(heavy)["reserved"] == 2 * 1024 * 1024
 
 
 def decimal_kind():
@@ -295,18 +319,21 @@ def test_prescan_floor_holds_crypto():
     assert _row(crypto_kind)["reserved"] == CRYPTO_COLD       # held at the floor
 
 
-def test_non_prescan_kind_still_learns_down():
-    # The floor is prescan-specific: a kind with no heavy-frame symbol still
-    # shrinks toward its real usage (the floor is 0 for it).
+def test_non_prescan_kind_still_learns_down(monkeypatch):
+    # The prescan floor is prescan-specific: a kind with no heavy-frame symbol
+    # still shrinks toward its real usage.  Start above the FT-3.14 spawn floor
+    # so the shrink is observable there too.
+    monkeypatch.setenv("RUNLOOM_STACK_AUTOSIZE_START", str(BIG_START))
     runloom.inspect.enable_stack_autosize(True, prescan=True)
     _batch([heavy], 20)
     _batch([heavy], 20)
-    assert _row(heavy)["reserved"] < START
+    assert _row(heavy)["reserved"] < BIG_START
 
 
-def test_autosize_under_mn():
+def test_autosize_under_mn(monkeypatch):
     # Under M:N the hubs run concurrently with spawning, so a kind learns down
     # within a batch; use a second batch for a deterministic learned size.
+    monkeypatch.setenv("RUNLOOM_STACK_AUTOSIZE_START", str(BIG_START))
     runloom.inspect.enable_stack_autosize(True)
     runloom_c.mn_init(2)
     try:
@@ -320,5 +347,6 @@ def test_autosize_under_mn():
         runloom_c.mn_fini()
     row = _row(heavy)
     assert row["samples"] == 40
-    assert row["reserved"] == _learned(row["max_hwm"])   # autosizer applied it
-    assert row["reserved"] < START                        # learned down from large
+    # the spawn-time floor caps how far the learned size can be applied
+    assert row["reserved"] == max(_learned(row["max_hwm"]), FLOOR)
+    assert row["reserved"] < BIG_START                    # learned down from large

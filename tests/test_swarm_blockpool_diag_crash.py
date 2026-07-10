@@ -580,13 +580,15 @@ class TestCrashClassification:
             runloom.inspect.install_crash_handler("on")
             def boom():
                 runloom_c._crash_selftest_overflow()   # unbounded real-C recursion
-            runloom_c.fiber(boom, 16384)                  # small 16 KiB stack
+            # 256 KiB: honored exactly on both 3.13 (16 KiB floor) and FT-3.14
+            # (256 KiB floor, the p226 fix in 289ecb99).
+            runloom_c.fiber(boom, 256 * 1024)
             runloom_c.run()
         """, timeout=40)
         assert rc2 in FAULT_RCS, (rc2, out)            # chained out -> cored
         assert "GOROUTINE STACK OVERFLOW" in out, out
         assert "guard page" in out, out                # named the CLEAN trap
-        assert "16 KiB" in out, out
+        assert "256 KiB" in out, out
         assert "=== runloom fiber dump" in out, out
 
     @mn_only
