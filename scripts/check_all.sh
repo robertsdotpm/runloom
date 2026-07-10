@@ -76,7 +76,7 @@ fi
 phases=("$@")
 [ ${#phases[@]} -eq 0 ] && phases=(tests mn replay lincheck dst ctest)
 if [ "${phases[0]}" = all ]; then
-  phases=(tests mn replay lincheck dst ctest static sanitizers exttsan verify ctxcheck dbgnetpoll migdelay chess ftconform mr combo security refleak racerd)
+  phases=(tests mn replay lincheck dst ctest static sanitizers exttsan verify ctxcheck dbgnetpoll migdelay chess ftconform conform mr combo security refleak racerd)
 fi
 
 rc=0
@@ -168,6 +168,14 @@ for ph in "${phases[@]}"; do
       hr "STW (M2) trace conformance -- real CPython stop-the-world vs the model"
       tools/stw_conform_ci.sh || rc=1
       ;;
+    conform)
+      hr "Upstream stdlib conformance -- CPython test_asyncio on RunloomEventLoop + test_free_threading under monkey.patch"
+      # uvloop/gevent pattern: run CPython's own suites against runloom, minus the
+      # documented known-failures.  Multi-minute (esp. free_threading), so this
+      # lives in the extensive lane only, not check_all_fast.
+      PYTHON_GIL=0 PYTHON_TLBC=0 PYTHONPATH=src "$PYTHON" tools/conformance/run_asyncio.py || rc=1
+      PYTHON_GIL=0 PYTHON_TLBC=0 PYTHONPATH=src "$PYTHON" tools/conformance/run_free_threading.py || rc=1
+      ;;
     bench)
       hr "Rigorous microbench sweep (informational -- bootstrap CIs)"
       PYTHON="$PYTHON" bash tools/bench/bench.sh || rc=1
@@ -207,7 +215,7 @@ for ph in "${phases[@]}"; do
       PYTHON="$PYTHON" tools/racerd.sh || rc=1
       ;;
     *)
-      echo "unknown phase: $ph (want: tests mn replay lincheck dst ctest static sanitizers exttsan verify verify-fast ctxcheck dbgnetpoll migdelay chess ftconform mr bench combo security refleak racerd all)"; rc=2 ;;
+      echo "unknown phase: $ph (want: tests mn replay lincheck dst ctest static sanitizers exttsan verify verify-fast ctxcheck dbgnetpoll migdelay chess ftconform conform mr bench combo security refleak racerd all)"; rc=2 ;;
   esac
 done
 
