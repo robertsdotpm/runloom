@@ -134,8 +134,7 @@ class _LoopScheduleMixin(object):
                         self._pg_signal_fatal(e)
                     except BaseException as e:
                         self.call_exception_handler(
-                            {"message": "call_soon callback", "exception": e,
-                             "handle": handle})
+                            {"message": "call_soon callback", "exception": e})
                 with self._ts_lock:
                     self._ts_queue.append(_DeferredSpawn(lambda: _fiber_io(_runner)))
                 return handle
@@ -156,8 +155,7 @@ class _LoopScheduleMixin(object):
                     # signal the loop to break the drive and re-raise.
                     self._pg_signal_fatal(e)
                 except BaseException as e:
-                    self.call_exception_handler({"message": "call_soon callback",
-                                                 "exception": e, "handle": handle})
+                    self.call_exception_handler({"message": "call_soon callback", "exception": e})
         # asyncio's done-callbacks (gather, wait_for) generally don't
         # yield -- they just walk children + set the outer future.
         # We use fiber_noyield to skip the per-g snap dance.  If a user
