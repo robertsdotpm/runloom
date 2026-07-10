@@ -625,16 +625,23 @@ def test_waitgroup_two_group_barrier_reusable():
             wg1.add(N)
             wg2.add(N)
             exited = rc.Chan(N)
+            reached = rc.Chan(N)                  # checkpoint: worker is at wg2 barrier
 
             def worker():
                 wg1.done()
+                reached.try_send(True)
                 wg2.wait()
                 exited.try_send(True)
             for _ in range(N):
                 runloom.fiber(worker)
             wg1.wait()                           # all workers reached Done(wg1)
             for _ in range(N):
-                # No worker may have exited yet: wg2 barrier still closed.
+                reached.recv()                   # all workers are now AT the wg2 barrier
+            for _ in range(N):
+                # With a correct barrier every worker is parked on wg2.wait()
+                # (counter N>0); none may have exited before we Done it.  Gating on
+                # `reached` first makes a broken (non-blocking) wait() reliably
+                # surface here instead of racing the point-in-time try_recv.
                 assert exited.try_recv() is None, "barrier released too soon"
                 wg2.done()
             drained = 0
