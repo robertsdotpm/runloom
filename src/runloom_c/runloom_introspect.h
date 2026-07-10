@@ -85,6 +85,32 @@ runloom_g_t *runloom_greg_head_for_gc(void);
  * The anchor consults this at init to refuse to run blind. */
 int runloom_greg_is_linked(void);
 
+/* ---- base-snap registry (GC visibility for the run() caller's frames) ----
+ *
+ * The single-thread scheduler saves the run() caller's Python frame chain into a
+ * `sched_snap` local at drain entry and then runs fibers on the SAME tstate, so
+ * while a fiber executes tstate->current_frame points at the fiber and the
+ * caller's frames live only in sched_snap -- invisible to the collector's live-
+ * tstate walk, the same blind spot the GC frames anchor closes for fibers.
+ * (M:N hub base snaps are frameless -- the hub tstate hosts only fibers -- and
+ * the main tstate's caller frames stay reachable via its own current_frame, so
+ * only the single-thread drain needs this.)
+ *
+ * The drain supplies a stack-local node (its lifetime spans the whole run, and
+ * it is registered at entry / unregistered at the single exit -- no allocation,
+ * no heap lifetime to track).  The anchor walks the list under STW. */
+typedef struct runloom_base_snap_node {
+    void *snap;                            /* runloom_pystate_snap_t* (opaque here) */
+    struct runloom_base_snap_node *next;
+    struct runloom_base_snap_node *prev;
+} runloom_base_snap_node_t;
+
+void runloom_base_snap_register(runloom_base_snap_node_t *node, void *snap);
+void runloom_base_snap_unregister(runloom_base_snap_node_t *node);
+/* STW-only, lock-free head read for the anchor (same contract as
+ * runloom_greg_head_for_gc). */
+runloom_base_snap_node_t *runloom_base_snap_head_for_gc(void);
+
 /* Per-incarnation fiber id, Go's goid analogue.  Contention-free:
  * a per-thread counter ORed with a per-thread base, so spawning on many
  * hubs never touches a shared cacheline.  Unique for the process life. */

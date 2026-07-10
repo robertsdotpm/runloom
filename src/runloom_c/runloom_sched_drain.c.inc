@@ -151,6 +151,13 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
 {
     Py_ssize_t completed_before = s->completed;
     runloom_pystate_snap_t sched_snap;
+    /* GC visibility: while a fiber runs, tstate->current_frame points at the
+     * fiber and the run() caller's Python frames live only in sched_snap --
+     * invisible to the free-threaded collector's live-tstate walk.  Register the
+     * snap so the GC frames anchor visits it (module_gcframes.c.inc); the node is
+     * a stack local whose lifetime is this whole drain, registered at entry and
+     * unregistered at the single exit below.  No-op when the anchor is inactive. */
+    runloom_base_snap_node_t gc_base_node;
     /* An async Python signal handler (Ctrl-C etc.) that RAISED while we were
      * idle: carry it across the exit-path sched_snap load (which restores
      * current_exception from the snap and would otherwise clobber it), then
@@ -160,6 +167,7 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
 
     s->stopping = 0;
     runloom_pystate_snap(&sched_snap);
+    runloom_base_snap_register(&gc_base_node, &sched_snap);
 
     while (!s->stopping && (!runloom_sched_ready_empty(s) ||
                             s->sleep_size > 0 ||
@@ -579,6 +587,11 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
     }
     /* Restore drain's tstate before returning to Python. */
     runloom_pystate_load(&sched_snap);
+    /* Unregister the base snap now that its frames are back on ts->current_frame
+     * (CPython-visible again) and sched_snap.valid == 0.  MUST happen before we
+     * return: gc_base_node is a stack local of this frame.  Single exit, so this
+     * is the only unregister site. */
+    runloom_base_snap_unregister(&gc_base_node);
     /* Deadlock detection.  The loop above exited; if it exited because the
      * scheduler went QUIESCENT (not because of a clean sched_stop) yet
      * fibers remain parked on a channel / via park_safe, those fibers

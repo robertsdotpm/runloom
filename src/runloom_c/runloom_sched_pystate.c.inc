@@ -313,6 +313,15 @@ void runloom_pystate_snap(runloom_pystate_snap_t *snap)
     snap->c_stack_refs = runloom_tstate_take_cstack_refs(ts);
 #endif
 
+    /* SEAM INVARIANT L5 (GC-load-bearing since the GC frames anchor):
+     * snap->valid = 1 is the LAST write and this whole function is safepoint-free
+     * (only Py_XINCREFs, plain copies, mutex ops, and the two ref-neutral
+     * Py_CLEARs at :267-268 which took their own refs first).  So the anchor,
+     * under STW, never observes a half-written snap: before this store the chain
+     * is tstate-visible only, after it the chain is BOTH tstate-visible (ts->
+     * current_frame not yet overwritten) and snap-visible -- an over-visibility
+     * that is safe (see module_gcframes.c.inc's double-visit analysis).  Do NOT
+     * move valid=1 earlier or introduce a safepoint above it. */
     snap->valid = 1;
 }
 
@@ -513,6 +522,13 @@ void runloom_pystate_load(runloom_pystate_snap_t *snap)
     snap->c_stack_refs = NULL;
 #endif
 
+    /* SEAM INVARIANT L1/L2/L3 (GC-load-bearing since the GC frames anchor): the
+     * ts->current_frame restore (:497 above) and the c_stack_refs restore (just
+     * above) MUST precede this valid=0, and load must NEVER null snap->
+     * current_frame before it.  Any safepoint reached while unwinding the
+     * previous context (the Py_XDECREFs above may run __del__) therefore still
+     * sees the resuming chain snap-visible (valid==1) -- and, after :497, ALSO
+     * tstate-visible -- so the anchor's walk never loses it during the swap. */
     snap->valid = 0;
 }
 
@@ -555,6 +571,14 @@ void runloom_pystate_snap_clear(runloom_pystate_snap_t *snap)
      * the head.  The shared tstate already had its list cleared at snap time. */
     snap->c_stack_refs = NULL;
 #endif
+    /* SEAM INVARIANT L4 (GC-load-bearing since the GC frames anchor): valid=0 is
+     * the LAST write.  A g destroyed while parked runs the Py_CLEARs above (which
+     * may dealloc -> __del__ -> a GC safepoint), but this function never touches
+     * snap->current_frame's contents and the g's datastack chunks are not
+     * recycled until AFTER the owning g is unlinked from the registry
+     * (runloom_g_slab_reclaim unlinks before free; mn_fini reclaims chunks only
+     * after slab reclaim).  So any safepoint here still finds an intact,
+     * still-registered, still-valid chain to walk -- never freed memory. */
     snap->valid = 0;
 }
 

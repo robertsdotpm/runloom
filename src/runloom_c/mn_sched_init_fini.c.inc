@@ -551,11 +551,19 @@ void runloom_mn_fini(void)
             drain_spins++;
         }
     }
+    /* runloom_g_slab_reclaim unlinks each g from the fiber registry BEFORE
+     * free()ing it (runloom_sched_core.c.inc), and the leftover-drain above
+     * snap_clear'd (valid=0) every abandoned parked g.  So after this returns the
+     * registry holds no pointer into freed g structs, and no valid=1 snap points
+     * into a chunk we are about to reclaim -- the GC frames anchor is safe across
+     * teardown (any post-run gc.collect walks an empty/clean registry). */
     runloom_g_slab_reclaim();
     /* Free the datastack-chunk graveyard the hubs spliced their TLS chunk caches
      * into at exit.  Every hub is joined, so no foreign sys._current_frames reader
      * can still be inside a chunk's grace window -- returning them to the OS is
-     * sound.  Closes the dominant M:N per-fiber datastack-chunk RSS leak. */
+     * sound.  Closes the dominant M:N per-fiber datastack-chunk RSS leak.  Safe wrt
+     * the GC frames anchor: every g was unlinked from the registry by the slab
+     * reclaim just above, so no anchor walk can reach a frame in these chunks. */
     runloom_chunk_pool_reclaim();
     PyMem_Free(runloom_hubs);
     runloom_hubs = NULL;

@@ -173,6 +173,9 @@ static runloom_mutex_t runloom_greg_lock;
 static int          runloom_greg_inited = 0;
 static runloom_g_t    *runloom_greg_head   = NULL;   /* doubly-linked, no tail */
 static long         runloom_greg_total  = 0;      /* live + cached structs */
+/* base-snap registry head (single-thread drains' caller frames); shares
+ * runloom_greg_lock.  Defined here so runloom_introspect_fini can reset it. */
+static runloom_base_snap_node_t *runloom_base_snap_head = NULL;
 
 void runloom_introspect_init(void)
 {
@@ -205,6 +208,7 @@ void runloom_introspect_fini(void)
     if (!runloom_greg_inited) return;
     RUNLOOM_RLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
     runloom_greg_head = NULL;
+    runloom_base_snap_head = NULL;
     __atomic_store_n(&runloom_greg_total, 0L, __ATOMIC_RELAXED);
     RUNLOOM_RUNLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
 }
@@ -265,6 +269,9 @@ void runloom_introspect_reset_after_fork(void)
 {
     runloom_mutex_init(&runloom_greg_lock);
     runloom_greg_head = NULL;
+    /* The parent's single-thread drain (if any) does not run in the child; drop
+     * its base-snap node so the anchor never walks a stale stack address. */
+    runloom_base_snap_head = NULL;
     __atomic_store_n(&runloom_greg_total, 0L, __ATOMIC_RELAXED);
     runloom_greg_inited = 1;
 }
@@ -310,6 +317,42 @@ runloom_g_t *runloom_greg_head_for_gc(void)
 int runloom_greg_is_linked(void)
 {
     return runloom_greg_inited && !runloom_greg_off();
+}
+
+/* ---- base-snap registry (single-thread drain's caller frames) ----
+ * Shares runloom_greg_lock (both are cold: base-snap register/unregister happen
+ * once per run() at drain entry/exit; the rank stays GREG so no new lock-order
+ * edge is introduced).  The head is read lock-free by the anchor under STW.
+ * (runloom_base_snap_head is declared with the other registry statics above.) */
+void runloom_base_snap_register(runloom_base_snap_node_t *node, void *snap)
+{
+    if (node == NULL || !runloom_greg_inited) return;
+    node->snap = snap;
+    RUNLOOM_RLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
+    node->prev = NULL;
+    node->next = runloom_base_snap_head;
+    if (runloom_base_snap_head != NULL) runloom_base_snap_head->prev = node;
+    runloom_base_snap_head = node;
+    RUNLOOM_RUNLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
+}
+
+void runloom_base_snap_unregister(runloom_base_snap_node_t *node)
+{
+    if (node == NULL || !runloom_greg_inited) return;
+    RUNLOOM_RLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
+    if (node->prev != NULL) node->prev->next = node->next;
+    else if (runloom_base_snap_head == node) runloom_base_snap_head = node->next;
+    if (node->next != NULL) node->next->prev = node->prev;
+    node->prev = NULL;
+    node->next = NULL;
+    node->snap = NULL;
+    RUNLOOM_RUNLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
+}
+
+runloom_base_snap_node_t *runloom_base_snap_head_for_gc(void)
+{
+    if (!runloom_greg_inited) return NULL;
+    return runloom_base_snap_head;
 }
 
 /* Count fibers owned by `owner` parked on a channel or via park_safe --

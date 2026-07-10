@@ -44,12 +44,15 @@ static unsigned long long runloom_gcframes_walked_gs = 0;
 
 #if defined(RUNLOOM_GCFRAMES_ANCHOR)
 
-/* Visit one parked g's saved chains (frame chain + privatized c_stack_refs).
- * Skips gs with no live snap (running: chain is on the hub tstate and CPython
- * walks it; fresh/done: no frames).  Returns the first non-zero visit result. */
+/* Forward: visit one saved snap's chains. */
+static int runloom_gcframes_visit_snap(runloom_pystate_snap_t *snap,
+                                       visitproc visit, void *arg, int subtract);
+
+/* Visit one registered g's saved chains.  Skips gs with no live snap (running:
+ * chain is on the hub/sched tstate and CPython walks it; fresh/done: no frames)
+ * and FREED slab residents.  Returns the first non-zero visit result. */
 static int runloom_gcframes_visit_g(runloom_g_t *g, visitproc visit, void *arg, int subtract)
 {
-    int r;
     if (__atomic_load_n(&g->state, __ATOMIC_RELAXED) == RUNLOOM_GST_FREED) {
         return 0;   /* FREED slab resident, still registry-linked: no live snap */
     }
@@ -57,12 +60,24 @@ static int runloom_gcframes_visit_g(runloom_g_t *g, visitproc visit, void *arg, 
         return 0;   /* running (hub-tstate-visible) or fresh/done */
     }
     runloom_gcframes_walked_gs++;
-    if (g->snap.current_frame != NULL) {
-        r = runloom_gcvisit_frame_chain((void *)g->snap.current_frame, visit, arg, subtract);
+    return runloom_gcframes_visit_snap(&g->snap, visit, arg, subtract);
+}
+
+/* Visit one saved snap's chains (frame chain + privatized c_stack_refs).  Shared
+ * by the g walk and the base-snap walk. */
+static int runloom_gcframes_visit_snap(runloom_pystate_snap_t *snap,
+                                       visitproc visit, void *arg, int subtract)
+{
+    int r;
+    if (!snap->valid) {
+        return 0;
+    }
+    if (snap->current_frame != NULL) {
+        r = runloom_gcvisit_frame_chain((void *)snap->current_frame, visit, arg, subtract);
         if (r) return r;
     }
-    if (g->snap.c_stack_refs != NULL) {
-        r = runloom_gcvisit_cstack_chain(g->snap.c_stack_refs, visit, arg, subtract);
+    if (snap->c_stack_refs != NULL) {
+        r = runloom_gcvisit_cstack_chain(snap->c_stack_refs, visit, arg, subtract);
         if (r) return r;
     }
     return 0;
@@ -71,6 +86,7 @@ static int runloom_gcframes_visit_g(runloom_g_t *g, visitproc visit, void *arg, 
 static int runloom_gcframes_traverse(PyObject *self, visitproc visit, void *arg)
 {
     runloom_g_t *g;
+    runloom_base_snap_node_t *b;
     int subtract;
     /* Non-STW callers (gc.get_referents / get_referrers, a debugger) run
      * concurrently with parks and would read a moving registry/snap -- report
@@ -80,10 +96,22 @@ static int runloom_gcframes_traverse(PyObject *self, visitproc visit, void *arg)
     }
     subtract = runloom_gc_in_subtract_pass(self);
     runloom_gcframes_walks++;
-    /* Every registered g: default-mode M:N fibers AND single-thread-scheduler
+    /* 1. Every registered g: default-mode M:N fibers AND single-thread-scheduler
      * fibers, all of which park through runloom_pystate_snap into g->snap. */
     for (g = runloom_greg_head_for_gc(); g != NULL; g = g->reg_next) {
         int r = runloom_gcframes_visit_g(g, visit, arg, subtract);
+        if (r) return r;
+    }
+    /* 2. Base snaps: the single-thread drain's sched_snap holds the run() caller's
+     * frame chain while fibers run (ts->current_frame then points at the fiber).
+     * (M:N hub snaps are frameless and the main tstate's caller frames stay
+     * reachable via its own current_frame, so only single-thread drains register.) */
+    for (b = runloom_base_snap_head_for_gc(); b != NULL; b = b->next) {
+        int r;
+        if (b->snap == NULL) {
+            continue;
+        }
+        r = runloom_gcframes_visit_snap((runloom_pystate_snap_t *)b->snap, visit, arg, subtract);
         if (r) return r;
     }
     return 0;
