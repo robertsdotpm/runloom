@@ -76,7 +76,7 @@ fi
 phases=("$@")
 [ ${#phases[@]} -eq 0 ] && phases=(tests mn replay lincheck dst ctest)
 if [ "${phases[0]}" = all ]; then
-  phases=(tests mn replay lincheck dst ctest static sanitizers exttsan verify ctxcheck dbgnetpoll migdelay chess ftconform aioconform mr combo security refleak racerd)
+  phases=(tests mn replay lincheck dst ctest static sanitizers exttsan verify ctxcheck dbgnetpoll migdelay chess ftconform aioconform mr combo security supplychain refleak racerd)
 fi
 
 rc=0
@@ -212,6 +212,16 @@ for ph in "${phases[@]}"; do
       hr "Security -- deterministic subset S1-S4 (fuzzers S6-S9 -> daemon; cc/valgrind skip cleanly)"
       RUNLOOM_SEC_FAST=1 PYTHON="$PYTHON" tools/security/run_all.sh || rc=1
       ;;
+    supplychain)
+      hr "Supply-chain / backdoor scan -- semgrep+gitleaks+bandit + osv-scanner (deps)"
+      # Scan the tree for a planted backdoor / secret / vulnerable dep.  Each tool
+      # SELF-SKIPS if absent; DEPS=1 adds the network osv-scanner dep audit.
+      RUNLOOM_SC_DEPS=1 RUNLOOM_PYTHON="$PYTHON" bash tools/supplychain/scan.sh || rc=1
+      ;;
+    supplychain-fast)
+      hr "Supply-chain / backdoor scan -- OFFLINE subset (semgrep+gitleaks+bandit)"
+      RUNLOOM_SC_FAST=1 RUNLOOM_PYTHON="$PYTHON" bash tools/supplychain/scan.sh || rc=1
+      ;;
     refleak)
       hr "Refcount/alloc leak hunt (--with-pydebug ABI; self-skips cleanly off the dev box)"
       tools/run_refleak.sh || rc=1
@@ -221,7 +231,7 @@ for ph in "${phases[@]}"; do
       PYTHON="$PYTHON" tools/racerd.sh || rc=1
       ;;
     *)
-      echo "unknown phase: $ph (want: tests mn replay lincheck dst ctest static sanitizers exttsan verify verify-fast ctxcheck dbgnetpoll migdelay chess ftconform aioconform aioconform-fast mr bench combo security refleak racerd all)"; rc=2 ;;
+      echo "unknown phase: $ph (want: tests mn replay lincheck dst ctest static sanitizers exttsan verify verify-fast ctxcheck dbgnetpoll migdelay chess ftconform aioconform aioconform-fast mr bench combo security supplychain supplychain-fast refleak racerd all)"; rc=2 ;;
   esac
 done
 

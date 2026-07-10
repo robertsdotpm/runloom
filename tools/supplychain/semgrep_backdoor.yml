@@ -1,0 +1,118 @@
+# Custom Semgrep rules: BACKDOOR SHAPES, not generic style.
+#
+# runloom is systems code -- it uses subprocess, exec, sockets and signals
+# legitimately everywhere -- so a naive "no exec / no subprocess" rule would be a
+# wall of false positives.  These rules instead target the shapes a PLANTED
+# BACKDOOR takes that legitimate runloom code does not: obfuscated code execution
+# (base64/marshal/zlib decode fed to exec/eval), fetch-and-run, a hardcoded
+# external C2 endpoint, deserialization RCE gadgets on untrusted input, and
+# network calls at BUILD time (setup.py exfil).  Covers Python and C.
+#
+# A hit here means "explain this" -- either a real backdoor, or a legitimate case
+# that should be nosemgrep-annotated (with a reason) so the gate stays green and a
+# NEW occurrence reds.  Run: semgrep --config tools/supplychain/semgrep_backdoor.yml
+rules:
+  # ---- Python: obfuscated code execution --------------------------------
+  - id: runloom-exec-of-decoded-blob
+    languages: [python]
+    severity: ERROR
+    message: >
+      exec()/eval() of base64/zlib/marshal-decoded data -- the classic
+      obfuscated-payload backdoor.  Legitimate runloom code never execs a decoded
+      blob.
+    patterns:
+      - pattern-either:
+          - pattern: exec(...)
+          - pattern: eval(...)
+          - pattern: exec(compile(...))
+      - pattern-either:
+          - pattern-inside: exec(<... base64.$F(...) ...>)
+          - pattern-inside: exec(<... $B.b64decode(...) ...>)
+          - pattern-inside: exec(<... marshal.loads(...) ...>)
+          - pattern-inside: exec(<... zlib.decompress(...) ...>)
+          - pattern-inside: eval(<... base64.$F(...) ...>)
+          - pattern-inside: eval(<... $B.b64decode(...) ...>)
+          - pattern-inside: exec(compile(<... b64decode(...) ...>))
+
+  # ---- Python: fetch-and-run --------------------------------------------
+  - id: runloom-fetch-then-exec
+    languages: [python]
+    severity: ERROR
+    message: >
+      Network response passed to exec/eval/os.system -- fetch-and-run backdoor.
+    patterns:
+      - pattern-either:
+          - pattern: exec($REQ.$M(...).$X)
+          - pattern: exec($REQ.get(...).text)
+          - pattern: exec($REQ.get(...).content)
+          - pattern: eval($REQ.get(...).text)
+          - pattern: os.system($REQ.get(...).text)
+
+  # ---- Python: deserialization RCE gadget on untrusted input ------------
+  - id: runloom-untrusted-deser
+    languages: [python]
+    severity: WARNING
+    message: >
+      pickle/marshal/yaml.load on data from a socket/response/file read -- an RCE
+      gadget if the input is attacker-controlled.  Confirm the source is trusted.
+    patterns:
+      - pattern-either:
+          - pattern: pickle.loads($SOCK.recv(...))
+          - pattern: pickle.load($F)
+          - pattern: marshal.loads($SOCK.recv(...))
+          - pattern: yaml.load($X)
+      - pattern-not: yaml.load($X, Loader=yaml.SafeLoader)
+
+  # ---- Python/C: hardcoded external C2 endpoint -------------------------
+  - id: runloom-hardcoded-public-ip-connect
+    languages: [python]
+    severity: WARNING
+    message: >
+      A hardcoded PUBLIC IP literal near a connect()/socket -- a possible C2
+      endpoint.  Loopback/private ranges are excluded.  Confirm this address.
+    patterns:
+      - pattern-regex: '["'']((?!127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|0\.|255\.)\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})["'']'
+      - pattern-either:
+          - pattern-inside: |
+              $S.connect(...)
+          - pattern-inside: |
+              socket.create_connection(...)
+
+  # ---- Build-time (setup.py) network exfil ------------------------------
+  - id: runloom-network-in-setup
+    languages: [python]
+    severity: ERROR
+    paths:
+      include: ['setup.py', 'setup.cfg', 'conftest.py']
+    message: >
+      A network call in the BUILD/packaging path (setup.py/conftest) -- install-
+      time exfil / fetch-and-run is a top supply-chain backdoor vector.
+    pattern-either:
+      - pattern: urllib.request.urlopen(...)
+      - pattern: $R.get("http...", ...)
+      - pattern: $R.post(...)
+      - pattern: socket.socket(...)
+
+  # ---- C: shell-out / dynamic-load of a computed string -----------------
+  - id: runloom-c-system-nonliteral
+    languages: [c]
+    severity: WARNING
+    message: >
+      system()/popen() on a non-literal command in C -- confirm the argument is
+      not attacker- or network-controlled (command-injection / backdoor shell).
+    patterns:
+      - pattern-either:
+          - pattern: system($CMD)
+          - pattern: popen($CMD, ...)
+      - pattern-not: system("...")
+      - pattern-not: popen("...", ...)
+
+  - id: runloom-c-dlopen-computed
+    languages: [c]
+    severity: WARNING
+    message: >
+      dlopen() of a non-literal path in C -- loading a computed .so is a common
+      native backdoor stage.  Confirm the path is fixed/trusted.
+    patterns:
+      - pattern: dlopen($P, ...)
+      - pattern-not: dlopen("...", ...)

@@ -1,0 +1,17 @@
+# gitleaks config for runloom's supply-chain gate.  Uses the full default
+# ruleset, plus an allowlist for known false positives.  A NEW secret added to
+# the working tree (a planted C2 credential / API key / private key) reds the
+# gate; the entries below are confirmed non-secrets.
+title = "runloom supply-chain gitleaks"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "runloom confirmed false positives"
+regexTarget = "match"
+regexes = [
+  # A Python string literal listing cryptography class NAMES, not a key.
+  # (tools/heavy_frames/gen_heavy_frames.py: "Ed25519PrivateKey", "Ed448PrivateKey")
+  '''Ed(25519|448)PrivateKey''',
+]
