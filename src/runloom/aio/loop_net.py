@@ -42,7 +42,13 @@ class _LoopNetMixin(object):
                     s = _socket.socket(fam, typ, prt)
                     s.setblocking(False)
                     if local_addr is not None:
-                        s.bind(local_addr)
+                        try:
+                            s.bind(local_addr)
+                        except OSError as exc:
+                            raise OSError(
+                                exc.errno,
+                                "error while attempting to bind on address %r: %s"
+                                % (local_addr, (exc.strerror or "").lower())) from None
                     try:
                         s.connect(sa)
                     except BlockingIOError:
@@ -348,6 +354,9 @@ class _LoopNetMixin(object):
         """Wrap an already-accepted socket into a transport (server side).
         AbstractEventLoop raises NotImplementedError; servers that accept()
         manually (some test harnesses, custom acceptors) hand the socket here."""
+        if ssl_handshake_timeout is not None and not ssl:
+            raise ValueError(
+                "ssl_handshake_timeout is only meaningful with ssl")
         sock.setblocking(False)
         if ssl is not None:
             tls = _MemoryBIOTLS(sock, ssl, server_side=True)

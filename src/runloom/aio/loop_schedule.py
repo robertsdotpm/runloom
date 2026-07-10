@@ -125,6 +125,8 @@ class _LoopScheduleMixin(object):
                 # while the task's first step is a fiber would invert their order
                 # (DESIGN_loop_run_prerun_scheduling.md must-fix #1).
                 handle = _Handle(callback, args, self, context)
+                if handle._source_traceback:
+                    del handle._source_traceback[-1]  # strip this call_soon frame
                 def _runner(handle=handle, callback=callback, args=args):
                     if handle._cancelled:
                         return
@@ -141,6 +143,8 @@ class _LoopScheduleMixin(object):
             # Running loop, foreign thread: inline via the thread-safe queue.
             return self.call_soon_threadsafe(callback, *args, context=context)
         handle = _Handle(callback, args, self, context)
+        if handle._source_traceback:
+            del handle._source_traceback[-1]  # strip this call_soon frame
         def runner():
             if not handle._cancelled:
                 try:
@@ -183,6 +187,8 @@ class _LoopScheduleMixin(object):
         # callback -- this is how anyio's portal carries the caller-thread
         # context into a run_coroutine_threadsafe-spawned task.
         handle = _Handle(callback, args, self, context)
+        if handle._source_traceback:
+            del handle._source_traceback[-1]  # strip this call_soon_threadsafe frame
         with self._ts_lock:
             self._ts_queue.append(handle)
         return handle
@@ -279,8 +285,11 @@ class _LoopScheduleMixin(object):
 
     def call_later(self, delay, callback, *args, context=None):
         # Mirror asyncio: call_later is call_at(self.time() + delay, ...).
-        return self.call_at(self.time() + delay, callback, *args,
-                            context=context)
+        handle = self.call_at(self.time() + delay, callback, *args,
+                              context=context)
+        if handle._source_traceback:
+            del handle._source_traceback[-1]  # strip this call_later frame
+        return handle
 
     def call_at(self, when, callback, *args, context=None):
         self._check_closed()
@@ -291,6 +300,8 @@ class _LoopScheduleMixin(object):
         # the old round-trip through call_later (self.time() + (when -
         # self.time())) both drifted the value and forced it to float.
         handle = _TimerHandle(callback, args, self, when, context)
+        if handle._source_traceback:
+            del handle._source_traceback[-1]  # strip this call_at frame
         def runner():
             # Consult _cancelled BEFORE parking, not only after the sleep.
             # call_at commonly schedules a long timeout that is cancelled in the

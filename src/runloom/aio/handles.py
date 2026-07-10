@@ -116,6 +116,12 @@ class _Handle(asyncio.Handle):
     that loop.call_*() returns an asyncio.Handle."""
     def __init__(self, cb, args, loop, context=None):
         super().__init__(cb, args, loop, context)
+        # Strip THIS subclass __init__ frame so _source_traceback[-1] names the
+        # caller, not handles.py -- asyncio strips one frame per layer (each
+        # internal layer del's [-1]); the loop_schedule.py methods strip their
+        # own frame in turn.  No-op unless loop.get_debug() populated the list.
+        if self._source_traceback:
+            del self._source_traceback[-1]
 
 
 class _TimerHandle(asyncio.TimerHandle):
@@ -123,6 +129,8 @@ class _TimerHandle(asyncio.TimerHandle):
     runloom schedules via a fiber sched_sleep, not the loop's timer heap."""
     def __init__(self, cb, args, loop, when=0, context=None):
         super().__init__(when, cb, args, loop, context)
+        if self._source_traceback:
+            del self._source_traceback[-1]
 
 
 # ====================================================================

@@ -26,8 +26,6 @@ EV_SELECTOR_REDUNDANT = ("redundant selector variant -- identical to "
                          "(selector-independent)")
 EV_PIPE_HANG = "pipe/PTY transport HANGS on the runloom loop"
 EV_XTHREAD_HANG = "cross-thread call_soon_threadsafe HANGS on the runloom loop"
-EV_CLOSE = ("op after loop close() does not raise RuntimeError on the bridge "
-            "(add/remove-fds-after-close divergence)")
 EV_MULTIHOST = "multi-host create_server bind-error handling divergence"
 EV_NEW_PROCESS = ("HANGS: run_in_executor(ProcessPoolExecutor) never completes "
                   "on the runloom loop")
@@ -58,14 +56,6 @@ SKIPS = {
         "EPollEventLoopTests.*": EV_SELECTOR_REDUNDANT,
         "PollEventLoopTests.*": EV_SELECTOR_REDUNDANT,
 
-        # Handle._source_traceback's last frame is runloom's own handles.py
-        # __init__, not the caller: runloom captures the stack one frame deeper
-        # than asyncio (which skips its own frame via _getframe(1)).  Debug-mode
-        # source-traceback accuracy only.
-        "HandleTests.test_handle_source_traceback":
-            "Handle._source_traceback last frame is runloom's handles.py __init__, "
-            "not the caller (captured one frame too deep; debug-mode only)",
-
         # --- Canonical class (SelectEventLoopTests) divergences ---------------
         # Signal handlers not implemented on the loop.
         "SelectEventLoopTests.test_add_signal_handler":
@@ -91,30 +81,9 @@ SKIPS = {
         "SelectEventLoopTests.test_prompt_cancellation":
             "test reads loop._stop_serving (stock-loop internal the runloom loop doesn't mirror)",
 
-        # Operating on the loop after close() does not raise RuntimeError.
-        "SelectEventLoopTests.test_add_fds_after_closing": EV_CLOSE,
-        "SelectEventLoopTests.test_close": EV_CLOSE,
-        "SelectEventLoopTests.test_remove_fds_after_closing": EV_CLOSE,
-
-        # ssl_handshake_timeout without ssl=True does not raise ValueError.
-        "SelectEventLoopTests.test_connect_accepted_socket_ssl_timeout_for_plain_socket":
-            "ssl_handshake_timeout without ssl does not raise ValueError",
-
-        # EADDRINUSE OSError.strerror format differs from CPython's.
-        "SelectEventLoopTests.test_create_connection_local_addr_in_use":
-            "EADDRINUSE error message format differs (strerror lacks the address)",
-
         # Multi-host create_server bind-error handling divergence.
         "SelectEventLoopTests.test_create_server_multiple_hosts_ipv4": EV_MULTIHOST,
         "SelectEventLoopTests.test_create_server_multiple_hosts_ipv6": EV_MULTIHOST,
-
-        # Executor-future cancel semantics divergence (callback still ran).
-        "SelectEventLoopTests.test_run_in_executor_cancel":
-            "executor-future cancel semantics divergence (cancelled callback still ran)",
-
-        # add_writer partial-flush written-bytes mismatch (real gap).
-        "SelectEventLoopTests.test_writer_callback":
-            "add_writer partial-flush written-bytes mismatch (real gap)",
 
         # --- Leak-victim TAIL classes (skipped wholesale) --------------------
         # These are the get_event_loop-policy + Server-ABC tests that run AFTER

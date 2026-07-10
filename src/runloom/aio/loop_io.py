@@ -54,18 +54,25 @@ class _LoopIOMixin(object):
         return fd
 
     def add_reader(self, fd, callback, *args):
+        self._check_closed()
         return self._pg_set_io(self._pg_fileobj_to_fd(fd), 1,
                                _Handle(callback, args, self))
 
     def remove_reader(self, fd):
-        return self._pg_clear_io(self._pg_fileobj_to_fd(fd), 1)
+        # Still run _pg_clear_io even when closed (close() tears down the signal
+        # self-pipe io fiber THROUGH remove_reader after setting _closed), but
+        # report False on a closed loop to match asyncio's observable contract.
+        removed = self._pg_clear_io(self._pg_fileobj_to_fd(fd), 1)
+        return False if self._closed else removed
 
     def add_writer(self, fd, callback, *args):
+        self._check_closed()
         return self._pg_set_io(self._pg_fileobj_to_fd(fd), 2,
                                _Handle(callback, args, self))
 
     def remove_writer(self, fd):
-        return self._pg_clear_io(self._pg_fileobj_to_fd(fd), 2)
+        removed = self._pg_clear_io(self._pg_fileobj_to_fd(fd), 2)
+        return False if self._closed else removed
 
     def _pg_set_io(self, fd, evt, handle):
         st = self._io.get(fd)
@@ -130,6 +137,16 @@ class _LoopIOMixin(object):
                 st["r"]._run()
             if (ready & 2) and st["w"] is not None and not st["w"]._cancelled:
                 st["w"]._run()
+            # A dispatched callback may have called loop.stop(): end the drive on
+            # THIS loop thread now (one dispatch then stop, like asyncio's _run_once
+            # + run_forever break), instead of re-firing the reader/writer until the
+            # keepalive fiber next observes _stopping ~ms later.  sched_stop leaves
+            # this fiber parked, so a persistent reader/writer resumes next run.
+            if self._stopping:
+                try:
+                    runloom_c.sched_stop()
+                except Exception:
+                    pass
             # Yield before re-arming, mimicking a level-triggered selector pass.
             runloom_c.sched_yield_classic()
 

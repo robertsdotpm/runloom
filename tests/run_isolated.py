@@ -126,6 +126,14 @@ def run_file(name, pytest_args):
     env = dict(os.environ)
     env["PYTHON_GIL"] = "0"
     env["RUNLOOM_GIL"] = "0"
+    # Disable TLBC at interpreter START (free-threaded 3.14 SIGSEGV mitigation --
+    # see runloom.runtime._tlbc_reexec_if_needed).  Without this, the first
+    # in-process runloom.run() inside pytest os.execv's the whole pytest run
+    # while capture owns fd 1, so the re-exec'd run writes everything into the
+    # (deleted) capture tmpfile: the file "fails" with blank output and a
+    # useless exit code.  Presetting it here both avoids that mid-test re-exec
+    # and actually runs the suite TLBC-off, same as the soak/linz harnesses.
+    env.setdefault("PYTHON_TLBC", "0")
     # Skip pytest's third-party plugin autoload.  ~20 unrelated plugins
     # (codspeed/sanic/aiohttp/faker/hypothesis/...) are installed here and
     # pytest imports every one of them per process -- ~4s of pure overhead per

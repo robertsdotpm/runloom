@@ -76,6 +76,7 @@ class _LoopSubprocessMixin(object):
         that resolves when the thread completes.  We hand out a real
         threadpool via concurrent.futures."""
         import concurrent.futures as _cf
+        self._check_closed()
         if executor is None:
             # Lazy-init default pool.
             if self._default_executor is None:
@@ -85,7 +86,12 @@ class _LoopSubprocessMixin(object):
         cf_fut = executor.submit(func, *args)
         def _on_thread_done(_cf_fut):
             # Marshal the thread's result back into our RunloomFuture.
-            # call_soon_threadsafe wakes the loop.
+            # call_soon_threadsafe wakes the loop.  Don't marshal onto a CLOSED
+            # loop at all (mirrors asyncio's _chain_future is_closed guard): the
+            # dest future was already cancelled/abandoned, and scheduling here
+            # would run a callback on a dead loop.
+            if self._closed:
+                return
             def _set():
                 if cf_fut.cancelled():
                     fut.cancel()

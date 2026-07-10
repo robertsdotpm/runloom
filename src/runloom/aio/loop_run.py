@@ -70,6 +70,7 @@ class _LoopRunMixin(object):
                 "Cannot run the event loop while another loop is running")
 
     def run_until_complete(self, future):
+        self._check_closed()
         self._check_running()
         # Claim the loop for THIS (soon-to-drive) thread across the pre-run
         # window, so our own create_task(future) below spawns directly while a
@@ -239,6 +240,7 @@ class _LoopRunMixin(object):
                 pass  # Older build without sched_reset; best-effort drain.
 
     def run_forever(self):
+        self._check_closed()
         self._check_running()
         # Claim the loop for THIS soon-to-drive thread (see run_until_complete /
         # _can_spawn_here): a foreign thread's pre-run call_soon/create_task now
