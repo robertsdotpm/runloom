@@ -23,7 +23,8 @@ mkdir -p "$OUT"
 LOG="$OUT/net_echo_srv.log"
 
 echo "=== net_echo_server_forever START $(date '+%F %T') bind=${RUNLOOM_ECHO_BIND:-::}:${RUNLOOM_ECHO_PORT:-7777} ===" >> "$LOG"
-env PYTHON_GIL=0 PYTHON_TLBC=0 PYTHONPATH="$ROOT/src" \
+# RUNLOOM_TLBC=1: TLBC ON (safe via the GC frames anchor), no self-re-exec (stable pid).
+env PYTHON_GIL=0 RUNLOOM_TLBC=1 PYTHONPATH="$ROOT/src" \
     "$PY" "$ROOT/tools/soak/net_echo_server_forever.py" >> "$LOG" 2>&1 &
 child=$!
 echo "$child" > "$OUT/PID"

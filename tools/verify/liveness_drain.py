@@ -142,8 +142,9 @@ def main():
         sys.stderr.flush()
         os._exit(0 if args.teeth else 2)
 
-    # Timers set HERE (before runloom.run) so they re-establish intact in the
-    # TLBC re-exec child.  _delay_freeze() is atomic / thread-safe.
+    # Timers set HERE (before runloom.run) so they survive intact even if runloom
+    # falls back to the TLBC=0 re-exec (only when the GC frames anchor is inactive;
+    # by default TLBC stays on and there is no re-exec).  _delay_freeze() is atomic.
     freeze_t = threading.Timer(args.chaos, rc._delay_freeze)
     wd = threading.Timer(args.deadline, on_deadline)
     freeze_t.daemon = wd.daemon = True

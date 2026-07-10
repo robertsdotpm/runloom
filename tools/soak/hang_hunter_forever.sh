@@ -46,9 +46,10 @@ while true; do
   if ! load_ok; then sleep 30; continue; fi          # self-throttle vs the other loops
   DATE="$(date +%F)"
   OUT="$OUTBASE/$DATE/iter${iter}"; mkdir -p "$OUT"
-  # PYTHON_TLBC=0: hang_hunter's spawned M:N workloads must not TLBC-re-exec on
-  # ft-3.14 (see runloom.run/_tlbc_reexec_if_needed); PYTHON_GIL=0 for M:N.
-  nice -n 10 env PYTHON_GIL=0 PYTHON_TLBC=0 PYTHONPATH="$ROOT/src" \
+  # RUNLOOM_TLBC=1: keep TLBC ON (the GC frames anchor makes it safe -> real
+  # multi-core parallelism) AND guarantee runloom.run() never self-re-execs (stable
+  # daemon pids); PYTHON_GIL=0 for M:N.
+  nice -n 10 env PYTHON_GIL=0 RUNLOOM_TLBC=1 PYTHONPATH="$ROOT/src" \
       "$PY" -m tools.hang_hunter.daemon --duration "$HH_ITER" \
       --load-frac "$HH_LOAD_FRAC" --jobs "$HH_JOBS" --python "$PY" \
       --report-dir "$OUT" >"$OUT/run.log" 2>&1

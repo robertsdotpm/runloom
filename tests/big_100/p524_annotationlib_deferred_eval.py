@@ -130,12 +130,15 @@ VALUE_SCALE = 100000
 NSLOTS = 4
 
 # The CLASS-annotation arm drives the type ``__annotations__`` cache + shared
-# __annotate__ code objects concurrently across hubs -- which crashed on 3.14t via
-# the CPython thread-local-bytecode (TLBC) co_tlbc grow / QSBR free-list corruption
-# ({} desync then SIGSEGV).  runloom.run() now re-execs ft-3.14 with PYTHON_TLBC=0
-# (src/runloom/runtime.py), so the arm PASSES and is a live REGRESSION GUARD; it is
-# ON by default.  Set PYGO_P524_CLASS_ARM=0 to skip it, or RUNLOOM_TLBC=1 to re-arm
-# the crash for verification.
+# __annotate__ code objects concurrently across hubs -- which crashed on 3.14t with
+# TLBC on: a parked fiber's suspended frames (invisible to the free-threaded
+# collector's live-tstate walk) held the only deferred references to freshly
+# created code objects, so the collector freed them early and resume re-used freed
+# memory -> per-thread mimalloc free-list corruption -> SIGSEGV.  runloom_c's GC
+# frames anchor (module_gcframes.c.inc) now makes parked frames GC-visible, so the
+# arm PASSES with TLBC ON (the default) and is a live REGRESSION GUARD.  Set
+# PYGO_P524_CLASS_ARM=0 to skip it, or RE-ARM the crash for verification by
+# disabling the anchor while forcing TLBC on: RUNLOOM_TLBC=1 RUNLOOM_GC_FRAMES=0.
 CLASS_ARM = os.environ.get("PYGO_P524_CLASS_ARM", "1") != "0"
 
 # Run the (heavier) FORWARDREF fake-globals arm every Nth inner iteration so the

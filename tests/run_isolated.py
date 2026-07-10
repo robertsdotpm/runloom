@@ -126,14 +126,16 @@ def run_file(name, pytest_args):
     env = dict(os.environ)
     env["PYTHON_GIL"] = "0"
     env["RUNLOOM_GIL"] = "0"
-    # Disable TLBC at interpreter START (free-threaded 3.14 SIGSEGV mitigation --
-    # see runloom.runtime._tlbc_reexec_if_needed).  Without this, the first
-    # in-process runloom.run() inside pytest os.execv's the whole pytest run
-    # while capture owns fd 1, so the re-exec'd run writes everything into the
-    # (deleted) capture tmpfile: the file "fails" with blank output and a
-    # useless exit code.  Presetting it here both avoids that mid-test re-exec
-    # and actually runs the suite TLBC-off, same as the soak/linz harnesses.
-    env.setdefault("PYTHON_TLBC", "0")
+    # TLBC now stays ON by default: runloom_c's GC frames anchor
+    # (module_gcframes.c.inc) makes parked-fiber frames visible to the free-
+    # threaded collector, so the specializing interpreter is safe -- the p565/p524
+    # crash the old PYTHON_TLBC=0 preset used to avoid is fixed at the source.
+    # Running the suite TLBC-on matches production and exercises the anchor under
+    # every test.  We no longer preset PYTHON_TLBC=0, and because the anchor is
+    # active runloom.run() no longer os.execv's mid-pytest (the old
+    # capture-corruption hazard that motivated the preset is gone).  Diagnostic
+    # axis preserved: export PYTHON_TLBC=0 (inherited into env via the copy above)
+    # to force a TLBC-off run, e.g. for the gc.disable() discriminator or a bisect.
     # Skip pytest's third-party plugin autoload.  ~20 unrelated plugins
     # (codspeed/sanic/aiohttp/faker/hypothesis/...) are installed here and
     # pytest imports every one of them per process -- ~4s of pure overhead per

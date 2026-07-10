@@ -1,10 +1,15 @@
-# REGRESSION GUARD for a CPython 3.14t thread-local-bytecode (TLBC) SIGSEGV:
-# compileall/marshal.loads code-object creation under runloom's many-hub stackful
-# execution corrupts a hub pthread stack/TCB (mimalloc arena aliasing) -> SIGSEGV
-# in __tls_get_addr.  Root-caused via rr to CPython 3.14t's TLBC, NOT a runloom
-# bug (greenlet ships the same PYTHON_TLBC=0 mitigation).  runloom.run() now
-# re-execs ft-3.14 with PYTHON_TLBC=0 (src/runloom/runtime.py _tlbc_reexec_if_needed),
-# so this is a normal PASSing program; run with RUNLOOM_TLBC=1 to re-arm the crash.
+# REGRESSION GUARD for the thread-local-bytecode (TLBC) parked-frame GC SIGSEGV:
+# compileall/marshal.loads creates many code objects across hubs; with TLBC on
+# (the specializing interpreter), a PARKED fiber's suspended frames -- invisible
+# to the free-threaded collector's live-tstate walk -- hold the only (deferred)
+# references to some of them, so the collector frees them early and the fiber
+# re-uses freed memory on resume -> per-thread mimalloc free-list corruption ->
+# SIGSEGV in __tls_get_addr / _PyCode_New.  (Same crash class as greenlet's,
+# fixed upstream in greenlet PR #511 for 3.15.)  runloom_c now ships the fix: the
+# GC frames anchor (module_gcframes.c.inc) makes parked frames GC-visible, so this
+# PASSES with TLBC ON -- the default.  To RE-ARM the crash for verification,
+# disable the anchor while forcing TLBC on:
+#   RUNLOOM_TLBC=1 RUNLOOM_GC_FRAMES=0 python3 p565_compileall_bytecode_purity.py
 
 """big_100 / 565 -- compileall.compile_file bytecode PURITY + determinism under M:N.
 

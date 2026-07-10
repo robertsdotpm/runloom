@@ -30,8 +30,9 @@ mkdir -p "$OUT"
 LOG="$OUT/net_echo.log"
 
 echo "=== net_echo_forever START $(date '+%F %T') -> ${RUNLOOM_ECHO_HOST:-ovh1.p2pd.net}:${RUNLOOM_ECHO_PORT:-7} ===" >> "$LOG"
-# PYTHON_TLBC=0 up front so runloom does NOT self-re-exec (keeps one stable pid).
-env PYTHON_GIL=0 PYTHON_TLBC=0 PYTHONPATH="$ROOT/src" \
+# RUNLOOM_TLBC=1: keep TLBC ON (safe via the GC frames anchor) and guarantee
+# runloom does NOT self-re-exec (keeps one stable pid).
+env PYTHON_GIL=0 RUNLOOM_TLBC=1 PYTHONPATH="$ROOT/src" \
     "$PY" "$ROOT/tools/soak/net_echo_forever.py" >> "$LOG" 2>&1 &
 child=$!
 echo "$child" > "$OUT/PID"

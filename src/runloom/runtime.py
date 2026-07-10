@@ -166,28 +166,37 @@ def gil_enabled():
 
 
 def _tlbc_reexec_if_needed():
-    """Disable CPython 3.14's thread-local bytecode (TLBC) on free-threaded
-    builds by re-exec'ing the process with PYTHON_TLBC=0.
+    """Fall back to PYTHON_TLBC=0 ONLY when the GC frames anchor is inactive.
 
-    WHY: 3.14's free-threaded specializing interpreter gives every OS thread its
-    own copy of a code object's bytecode (co_tlbc, selected via tstate->tlbc_index
-    from TLS) and reclaims old copies through mimalloc's QSBR delayed-free.  Under
-    runloom's many-hub stackful model -- H hub OS threads each with a large idle
-    glibc pthread stack (the fiber runs on a separate fcontext stack) driving
-    thousands of goroutines' worth of code-object churn -- 3.14 allocates/grows/
-    frees per-thread bytecode at a rate that trips a CPython free-threading heap
-    bug: a mimalloc arena aliases a live hub pthread stack/TCB (SIGSEGV in
-    __tls_get_addr / _PyCode_New) or its co_tlbc free-list corrupts.  Regression
-    guards: tests/big_100/quarantine_p565_compileall_tls_segv.py and p524's class
-    arm both SIGSEGV with TLBC on and pass with it off.  This is a CPython-3.14t
-    defect (greenlet -- another stackful runtime -- ships the same PYTHON_TLBC=0
-    mitigation), NOT a runloom scheduler bug: cross-hub live-frame migration was
-    ruled out (live-frame gs are hub-pinned in the default scheduler).
+    On free-threaded 3.14+, thread-local bytecode (TLBC) turns on the specializing
+    interpreter, which is what gives hot Python loops real multi-core parallelism
+    across hubs (without it, all hub threads pound one shared inline-cache array
+    and pure-Python loops ANTI-scale -- ~13x slower at 8 threads, measured).  TLBC
+    was disabled here for a while because big_100 p565/p524 SIGSEGV'd with it on --
+    but that crash is NOT a CPython heap bug (the earlier "mimalloc arena aliases a
+    hub pthread stack" theory is superseded).  The real cause: the free-threaded
+    collector credits PEP-703 deferred-refcount stackrefs (code objects, functions,
+    deferred locals) only by walking LIVE tstates' current_frame chains, so a
+    PARKED runloom fiber's suspended frames -- held only in g->snap -- are invisible
+    and their deferred-only referents get freed early, then re-used after resume ->
+    heap corruption.  (Identical to greenlet's crash class, fixed upstream in
+    greenlet PR #511 for 3.15.)  runloom_c now ships the fix: a GC-tracked "frames
+    anchor" (module_gcframes.c.inc) walks the fiber registry under stop-the-world
+    and visits every parked chain, so deferred referents are credited and TLBC is
+    safe.  See runloom_c.gc_frames_active and RUNLOOM_GC_FRAMES.
 
-    TLBC is read once at interpreter start and cannot be toggled at runtime, so
-    the only fix is to relaunch with it off.  Scoped strictly to free-threaded
-    3.14+ (no TLBC exists before 3.14 or with the GIL on).  Opt back into TLBC
-    with RUNLOOM_TLBC=1 (accepting the crash risk) once CPython fixes it upstream."""
+    Interlock: keep TLBC ON whenever the anchor is active (the default on FT 3.14+).
+    Re-exec with PYTHON_TLBC=0 -- the pre-anchor workaround -- ONLY when the anchor
+    is inactive: RUNLOOM_GC_FRAMES=0, an anchor init failure, RUNLOOM_GREG_OFF
+    (which would blind its registry walk), or a build where the fix compiled out
+    (e.g. 3.13t).  That keeps the crashy "TLBC on + no parked-frame visibility"
+    combination unreachable.  Opt out of TLBC entirely with PYTHON_TLBC=0 / -X
+    tlbc=0; force TLBC on regardless with RUNLOOM_TLBC=1 (dev/debug only).
+
+    CAVEAT -- greenlet coexistence: greenlet's own suspended-frame GC fix is
+    3.15-only, so a process mixing greenlet with runloom on 3.14t STILL needs
+    PYTHON_TLBC=0 (our anchor covers runloom fibers, not greenlet's frames).  See
+    tests/test_greenlet_interop.py, which pins PYTHON_TLBC=0 for that reason."""
     if sys.version_info[:2] < (3, 14):
         return                              # no TLBC before 3.14
     if gil_enabled():
@@ -199,15 +208,25 @@ def _tlbc_reexec_if_needed():
     if (os.environ.get("PYTHON_TLBC") == "0"
             or sys._xoptions.get("tlbc") == "0"):
         return                              # already disabled by the launcher
-    # Relaunch the identical command with TLBC off.  os.execv inherits the
-    # current os.environ, so setting PYTHON_TLBC here reaches the new image;
-    # orig_argv preserves interpreter flags and -m invocations.
+    # TLBC safety interlock: keep TLBC on iff the parked-frame GC anchor is active.
+    try:
+        import runloom_c
+        anchor_active = bool(getattr(runloom_c, "gc_frames_active", 0))
+    except Exception:
+        anchor_active = False
+    if anchor_active:
+        return                              # anchor covers the crash -> TLBC stays on
+    # Anchor inactive -> relaunch the identical command with TLBC off (the
+    # pre-anchor workaround).  os.execv inherits the current os.environ, so setting
+    # PYTHON_TLBC here reaches the new image; orig_argv preserves interpreter flags
+    # and -m invocations.
     os.environ["PYTHON_TLBC"] = "0"
     os.environ["RUNLOOM_TLBC_REEXEC"] = "1"
     argv = list(getattr(sys, "orig_argv", None) or ([sys.executable] + sys.argv))
     sys.stderr.write(
-        "[runloom] free-threaded 3.14 detected -- re-exec with PYTHON_TLBC=0 to "
-        "avoid the CPython thread-local-bytecode SIGSEGV (opt out: RUNLOOM_TLBC=1)\n")
+        "[runloom] free-threaded 3.14 with the GC frames anchor INACTIVE -- re-exec "
+        "with PYTHON_TLBC=0 to avoid the parked-frame deferred-stackref SIGSEGV "
+        "(enable the anchor by unsetting RUNLOOM_GC_FRAMES/RUNLOOM_GREG_OFF)\n")
     sys.stderr.flush()
     try:
         os.execv(argv[0], argv)
