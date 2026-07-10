@@ -62,6 +62,16 @@ fi
 echo "== 4. stateful Hypothesis model of the channel API =="
 PYTHONPATH="$ROOT/src" "$PYTHON" -m pytest "$HERE/stateful_chan.py" -q -p no:cacheprovider || rc=1
 
+echo "== 5. generative linearizability battery (all primitives, seeded DST) =="
+# The abstract generalization of big_100: record a real concurrent history per
+# (primitive, seed) on the M:N scheduler and check it against the sequential
+# reference spec with the pure-Python WGL checker.  Bounded sweep here; the
+# unbounded hunt is tools/soak/linz_hunt_forever.sh.
+PYTHON_GIL=0 PYTHONPATH="$ROOT/src" "$PYTHON" "$HERE/linz/battery.py" --seeds 0 8 || rc=1
+
+echo "== 6. stateful Hypothesis models of Lock + weighted Semaphore =="
+PYTHONPATH="$ROOT/src" "$PYTHON" -m pytest "$HERE/linz/stateful_sync.py" -q -p no:cacheprovider || rc=1
+
 $RM -f "$HIST" "$HSEL" "$BAD"
 echo "== linearizability pipeline rc=$rc =="
 exit $rc
