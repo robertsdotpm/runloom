@@ -64,13 +64,27 @@ static inline int PyDict_GetItemRef(PyObject *d, PyObject *key, PyObject **resul
 /* ---- Per-coro Python object ---- */
 
 /* CPython thread-state snapshot.  These fields are not preserved by a
- * raw C-stack swap, but Python frame chain + recursion counters live
+ * raw C-stack swap, but the Python frame chain + recursion counters live
  * on the thread state and need to follow the coroutine.  We snapshot
  * what we can portably:
  *  - py_recursion_remaining / c_recursion_remaining (3.12+)
  *  - recursion_depth (older 3.x)
- * Other fields like the topmost frame chain are still UB territory and
- * are why we don't run unittest harness frames over yields. */
+ *  - current_frame, the topmost interpreter frame (3.13+, where it is a
+ *    direct PyThreadState member).  This one is load-bearing, not just a
+ *    counter: resume() MUST leave ts->current_frame exactly as it found it
+ *    (the caller's frame).  When a coro parks at yield_ it has pushed its
+ *    own frame onto ts->current_frame; if resume() returns without putting
+ *    the caller's frame back, ts->current_frame dangles into the coro.  A
+ *    later destroy of an unfinished coro then frees that frame's backing
+ *    store, and the free-threaded GC's thread-stack walk
+ *    (gc_visit_thread_stacks_mark_alive) follows the stale ->previous chain
+ *    into freed memory and spins forever.  Saving/restoring it keeps the
+ *    coro's live frames off the caller's chain (the GC descends only via
+ *    ->previous from current_frame, so a parked coro's frames become
+ *    invisible while still resident in the shared datastack for a later
+ *    resume).  We restore only the topmost pointer, never datastack_top --
+ *    reclaiming the coro's frame slots would let the caller overwrite a
+ *    still-parked coro. */
 typedef struct {
 #if PY_VERSION_HEX >= 0x030E0000
     int py_recursion_remaining;
@@ -81,6 +95,9 @@ typedef struct {
     int recursion_remaining;
 #else
     int recursion_depth;
+#endif
+#if PY_VERSION_HEX >= 0x030D0000
+    struct _PyInterpreterFrame *current_frame;
 #endif
     int initialised;
 } RunloomTstateSnapshot;
@@ -109,6 +126,9 @@ RUNLOOM_INLINE void runloom_tstate_save(RunloomTstateSnapshot *s)
 #else
     s->recursion_depth = ts->recursion_depth;
 #endif
+#if PY_VERSION_HEX >= 0x030D0000
+    s->current_frame = ts->current_frame;
+#endif
     s->initialised = 1;
 }
 
@@ -128,6 +148,9 @@ RUNLOOM_INLINE void runloom_tstate_restore(const RunloomTstateSnapshot *s)
     ts->recursion_remaining = s->recursion_remaining;
 #else
     ts->recursion_depth = s->recursion_depth;
+#endif
+#if PY_VERSION_HEX >= 0x030D0000
+    ts->current_frame = s->current_frame;
 #endif
 }
 
