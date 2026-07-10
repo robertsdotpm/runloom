@@ -57,6 +57,34 @@ Full derivations for the invariants below: [docs/dev/RUNTIME_GOTCHAS.md](docs/de
   (a patched `Lock` in an mp.Queue `_feed` thread) must detect no-goroutine (TLS
   peek NULL) and block on the real OS — never park a non-existent g, never lazily
   alloc sched state (`peek_current`, never `sched_get`).
+- **Parked-fiber frames are made GC-visible by the frames anchor.** The
+  free-threaded collector credits PEP-703 deferred stackrefs (code objects,
+  functions, deferred locals) only on LIVE tstate `current_frame` chains; a parked
+  fiber's frames live in `g->snap`, invisible — so with the specializing
+  interpreter on (TLBC), their deferred-only referents were freed early → resume
+  UAF (the p565/p524 crash). `module_gcframes.c.inc` registers ONE GC-tracked
+  anchor whose `tp_traverse` (stop-the-world only) walks the fiber registry + the
+  base-snap registry and visits every parked chain (greenlet-PR#511 visit set,
+  transcribed in `runloom_iframe.c`). Consequences that are now memory-safety
+  load-bearing: (1) the fiber registry (`runloom_greg`) must reach the anchor —
+  `RUNLOOM_GREG_OFF` loses (the anchor refuses to activate blind), and ANY new
+  spawn path that bypasses `runloom_greg_link` reopens the blind spot; (2) the
+  single-thread drain's caller frames must stay registered via the base-snap
+  registry (`runloom_base_snap_register`, one node per drain, paired at the single
+  exit); (3) the snap seam ordering L1–L5 (frozen in `runloom_sched_pystate.c.inc`
+  comments — `valid=1` last & safepoint-free on snap; `current_frame`/`c_stack_refs`
+  restored before `valid=0` on load; `valid=0` last on snap_clear) must not be
+  reordered; (4) the anchor is never immortal and its traverse never allocates;
+  (5) `gc.freeze()` is neutralised by a gc-`start` callback that thaws the anchor.
+  **TLBC stays ON iff `runloom_c.gc_frames_active`** — `runtime.py`'s
+  `_tlbc_reexec_if_needed` re-execs with `PYTHON_TLBC=0` only when the anchor is
+  inactive. **greenlet coexistence on 3.14t still needs `PYTHON_TLBC=0`** (its own
+  suspended-frame GC fix is 3.15-only; our anchor covers runloom fibers, not
+  greenlet's frames — see `tests/test_greenlet_interop.py`). `sys._clear_internal_caches`
+  is safe during `run()` (hub tstates own their TLBC indices for the whole run),
+  EXCEPT the upstream latent case of a suspended generator escaped from a since-dead
+  user thread. Guard: `tests/test_tlbc_parked_frame_gc.py` (+ p565/p524 as the
+  TLBC-on ground-truth oracle).
 
 ## aio bridge invariants (src/runloom/aio/)
 - Layout: `_base.py` is the foundation (`_go_io`, `_wait_fd`, `_CURRENT_TASKS`);
