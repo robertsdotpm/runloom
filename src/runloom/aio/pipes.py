@@ -1,4 +1,6 @@
 """_ReadPipeTransport / _WritePipeTransport (connect_read/write_pipe)."""
+import stat as _stat
+
 from ._base import *  # noqa: F401,F403  (shared foundation)
 
 class _ReadPipeTransport(asyncio.ReadTransport):
@@ -194,14 +196,22 @@ class _WritePipeTransport(asyncio.WriteTransport):
         self._low_water = 16 * 1024
         self._protocol_paused = False
         self._drain_g = None
+        # Only a SOCKET write-pipe gets a persistent READ park to detect the peer
+        # closing its end (POLLHUP) -> connection_lost, mirroring asyncio's
+        # _add_reader on the write fd.  A FIFO / anonymous pipe / PTY (subprocess
+        # stdin is a FIFO) keeps its exact idle-exit behaviour -- watch_hup False.
+        self._watch_hup = False
         try:
             _os.set_blocking(self._fd, False)
+            self._watch_hup = _stat.S_ISSOCK(_os.fstat(self._fd).st_mode)
         except OSError:
             pass
         try:
             protocol.connection_made(self)
         except Exception as e:
             self._report(e, "connection_made")
+        if self._watch_hup and not self._closing:
+            self._kick()   # keep a fiber parked to observe the peer HUP
 
     def _kick(self):
         # Wake/spawn the drain fiber after write()/write_eof changed the
@@ -221,33 +231,48 @@ class _WritePipeTransport(asyncio.WriteTransport):
     def _drain_loop(self):
         fd = self._fd
         while True:
-            if not self._buf:
-                if self._eof_requested:
-                    self._drain_g = None
-                    self._finish(None)
-                    return
-                self._drain_g = None
-                return                           # idle; respawn on next write()
-            chunk = bytes(self._buf[:262144])
-            try:
-                n = _os.write(fd, chunk)
-            except (BlockingIOError, InterruptedError):
+            # Drain everything currently buffered.
+            while self._buf:
+                chunk = bytes(self._buf[:262144])
                 try:
-                    _wait_fd(fd, _WAIT_WRITE)
-                except asyncio.CancelledError:
-                    continue                     # new write()/close: re-check
-                except Exception as e:
+                    n = _os.write(fd, chunk)
+                except (BlockingIOError, InterruptedError):
+                    break                        # not writable now; park below
+                except OSError as e:             # BrokenPipe etc.
                     self._drain_g = None
                     self._finish(e)
                     return
-                continue
-            except OSError as e:                 # BrokenPipe etc.
+                if n:
+                    del self._buf[:n]
+                    self._maybe_resume()
+            if not self._buf and self._eof_requested:
+                self._drain_g = None
+                self._finish(None)
+                return
+            # Park on the union of WRITE (bytes pending) and READ (HUP watch for a
+            # socket write-pipe).  For a non-socket pipe watch_hup is False, so the
+            # READ bit is never set and this behaves exactly like the old loop:
+            # park on WRITE while buffered, else exit idle.
+            mask = (_WAIT_WRITE if self._buf else 0) \
+                 | (_WAIT_READ if (self._watch_hup and not self._closing) else 0)
+            if mask == 0:
+                self._drain_g = None
+                return                           # idle; respawn on next write()
+            try:
+                ready = _wait_fd(fd, mask)
+            except asyncio.CancelledError:
+                continue                         # new write()/close: re-check
+            except Exception as e:
                 self._drain_g = None
                 self._finish(e)
                 return
-            if n:
-                del self._buf[:n]
-                self._maybe_resume()
+            if (ready & _WAIT_READ) and self._watch_hup:
+                # Peer closed its read end: pending bytes -> broken pipe, else a
+                # clean disconnect.  (Like asyncio's _read_ready, we treat any
+                # read-readiness on the write fd as the peer going away.)
+                self._drain_g = None
+                self._finish(BrokenPipeError() if self._buf else None)
+                return
 
     def _maybe_resume(self):
         if self._protocol_paused and len(self._buf) <= self._low_water:
@@ -284,6 +309,25 @@ class _WritePipeTransport(asyncio.WriteTransport):
         data = bytes(data)
         if not data:
             return
+        if not self._buf:
+            # Eager synchronous write when nothing is queued (mirrors stock
+            # unix_events._UnixWritePipeTransport.write).  On this single-thread
+            # loop a subsequent BLOCKING os.read on the pipe's read end (as the
+            # stdlib pipe/PTY tests do) would otherwise self-deadlock: the drain
+            # fiber can't run to write the byte until the read returns.  Safe re
+            # ordering -- the buffer is empty, so no drain fiber holds pending
+            # bytes; a real EPIPE is swallowed to n=0 and re-surfaced by the drain
+            # fiber's OSError->_finish path (not fired reentrantly inside write()).
+            try:
+                n = _os.write(self._fd, data)
+            except (BlockingIOError, InterruptedError):
+                n = 0
+            except OSError:
+                n = 0
+            if n >= len(data):
+                return
+            if n:
+                data = data[n:]
         self._buf += data
         if (not self._protocol_paused) and len(self._buf) > self._high_water:
             self._protocol_paused = True

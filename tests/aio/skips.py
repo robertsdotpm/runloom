@@ -24,7 +24,6 @@ GH96704 = ("gh-96704: the bridge runs the exception handler in the outer context
 EV_SELECTOR_REDUNDANT = ("redundant selector variant -- identical to "
                          "SelectEventLoopTests once the loop is runloom "
                          "(selector-independent)")
-EV_PIPE_HANG = "pipe/PTY transport HANGS on the runloom loop"
 EV_MULTIHOST = "multi-host create_server bind-error handling divergence"
 EV_NEW_PROCESS = ("HANGS: run_in_executor(ProcessPoolExecutor) never completes "
                   "on the runloom loop")
@@ -59,12 +58,6 @@ SKIPS = {
         # Signal handlers not implemented on the loop.
         "SelectEventLoopTests.test_add_signal_handler":
             "loop signal handlers unimplemented",
-
-        # Pipe / PTY transport deadlocks on the runloom loop.
-        "SelectEventLoopTests.test_bidirectional_pty": EV_PIPE_HANG,
-        "SelectEventLoopTests.test_write_pty": EV_PIPE_HANG,
-        "SelectEventLoopTests.test_write_pipe": EV_PIPE_HANG,
-        "SelectEventLoopTests.test_write_pipe_disconnect_on_close": EV_PIPE_HANG,
 
         # Tests reach into stock-loop internals the runloom loop doesn't mirror.
         "SelectEventLoopTests.test_timeout_rounding":
