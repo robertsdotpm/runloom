@@ -38,6 +38,17 @@
 #  define RUNLOOM_DESTRUCT_HAVE 1
 #endif
 
+/* GC visibility for parked-fiber frames: needs the free-threaded 3.14 collector
+ * bit + stackref predicates + the stop-the-world state on the interpreter.  Only
+ * available where the internal frame layout is (RUNLOOM_IFRAME_HAVE) and the
+ * free-threaded GC exists (Py_GIL_DISABLED, 3.14+). */
+#if defined(Py_GIL_DISABLED) && PY_VERSION_HEX >= 0x030E0000 && defined(RUNLOOM_IFRAME_HAVE)
+#  include "internal/pycore_gc.h"          /* _PyGC_BITS_UNREACHABLE; ob_gc_bits */
+#  include "internal/pycore_stackref.h"    /* PyStackRef_IsNullOrInt / IsDeferred / Borrow */
+#  include "internal/pycore_interp.h"      /* PyInterpreterState.stoptheworld.world_stopped */
+#  define RUNLOOM_GCFRAMES_HAVE 1
+#endif
+
 /* See runloom_iframe.h.  Freezes op's refcount (immortal) so cross-hub
  * incref/decref become no-ops -- the A1b hub-scaling experiment lever.  We set
  * the immortal refcount fields directly (mirroring _Py_SetImmortalUntracked):
@@ -310,3 +321,124 @@ void runloom_tstate_set_cstack_refs(void *tstate_v, void *head)
     (void)tstate_v; (void)head;
 #endif
 }
+
+/* ---- GC visibility for parked-fiber frames (free-threaded 3.14+) ----
+ * See runloom_iframe.h and module_gcframes.c.inc for the why.  The per-frame
+ * visit set is transcribed from greenlet PR #511 (PythonState::tp_traverse,
+ * GREENLET_PY315) + CPython's _PyGC_VisitStackRef / _PyGC_VisitFrameStack
+ * (Python/gc_free_threading.c), with the collector's static visit_decref
+ * comparison replaced by the caller's `subtract` flag (which the anchor derives
+ * from its own _PyGC_BITS_UNREACHABLE bit -- see runloom_gc_in_subtract_pass).
+ * NONE of this may allocate or free: the subtract-pass call site (update_refs)
+ * runs inside the collector's heap walk where touching mimalloc is forbidden. */
+#if defined(RUNLOOM_GCFRAMES_HAVE)
+
+int runloom_gc_world_stopped(void)
+{
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    return interp != NULL && interp->stoptheworld.world_stopped;
+}
+
+/* During update_refs the collector runs gc_maybe_init_refs(op) -- which SETS op's
+ * _PyGC_BITS_UNREACHABLE -- immediately before tp_traverse(op, visit_decref, NULL).
+ * Every PROPAGATION traverse runs with the bit CLEAR: mark-alive runs before any
+ * bits are set and marks ALIVE before traversing; mark_heap_visitor clears
+ * UNREACHABLE before mark_reachable; visit_clear_unreachable clears it before
+ * pushing; visit_decref_unreachable traverses only unreachable-worklist objects,
+ * which the always-rooted anchor can never be (its hidden C-global reference keeps
+ * gc_refs >= 1).  Hence, FOR THE ANCHOR OBJECT ONLY, the bit is set at traverse
+ * time IFF this is the subtract pass.  3.14.x-only; 3.15+ uses the exported
+ * visitors, which self-discriminate. */
+int runloom_gc_in_subtract_pass(PyObject *self)
+{
+    return self != NULL && (self->ob_gc_bits & _PyGC_BITS_UNREACHABLE) != 0;
+}
+
+/* One tagged stackref.  Mirrors _Py_VISIT_STACKREF (skip NullOrInt first: the
+ * collector asserts !IsTaggedInt) + the body of _PyGC_VisitStackRef: a deferred
+ * reference is NOT part of the refcount (update_refs already stripped the
+ * deferred bias), so the SUBTRACT pass must skip it -- visiting would
+ * double-subtract and free a LIVE object -- while every other pass treats it as a
+ * regular reference so propagation from the anchor keeps its referent alive. */
+static int runloom_visit_stackref(_PyStackRef *ref, visitproc visit, void *arg,
+                                  int subtract)
+{
+    PyObject *op;
+    if (PyStackRef_IsNullOrInt(*ref)) {
+        return 0;
+    }
+    if (subtract && PyStackRef_IsDeferred(*ref)) {
+        return 0;
+    }
+    op = PyStackRef_AsPyObjectBorrow(*ref);
+    if (op != NULL) {
+        return visit(op, arg);
+    }
+    return 0;
+}
+
+int runloom_gcvisit_frame_chain(void *top, visitproc visit, void *arg, int subtract)
+{
+    _PyInterpreterFrame *f = (_PyInterpreterFrame *)top;
+    for (; f != NULL; f = f->previous) {
+        int r;
+        _PyStackRef *ref, *sp;
+        /* Visit only thread-owned frames.  Generator/coroutine frames (owner ==
+         * FRAME_OWNED_BY_GENERATOR) are embedded in their independently GC-tracked
+         * gen objects, whose gen_traverse already visits them with per-visitor
+         * semantics -- visiting them here too would DOUBLE-SUBTRACT their counted
+         * stackrefs in update_refs.  FRAME_OWNED_BY_FRAME_OBJECT is likewise
+         * handled once by frame_traverse; INTERPRETER/CSTACK shim frames carry no
+         * user references.  Mirrors greenlet PR #511's owner filter exactly. */
+        if (f->owner != FRAME_OWNED_BY_THREAD) {
+            continue;
+        }
+        if (f->frame_obj != NULL) {                     /* strong ref; every pass */
+            r = visit((PyObject *)f->frame_obj, arg);   if (r) return r;
+        }
+        if (f->f_locals != NULL) {                      /* strong ref; every pass */
+            r = visit(f->f_locals, arg);                if (r) return r;
+        }
+        r = runloom_visit_stackref(&f->f_funcobj,    visit, arg, subtract); if (r) return r;
+        r = runloom_visit_stackref(&f->f_executable, visit, arg, subtract); if (r) return r;
+        ref = _PyFrame_GetLocalsArray(f);               /* == f->localsplus */
+        sp  = f->stackpointer;
+        if (sp == NULL) {
+            /* GH-129236 shape: a frame caught mid-PyStackRef_CLOSE has an
+             * un-synced stackpointer.  It should NOT occur in a PARKED chain
+             * (cooperative parks and preempt-yields suspend at call boundaries
+             * where the eval loop has synced the stackpointer -- asserted at snap,
+             * SECTION 3).  Skip the variable window defensively; the fixed fields
+             * above are already visited.  A stronger conservative handling (force
+             * the collector's skip_deferred_objects for that cycle) is a
+             * follow-up (design AM-1). */
+            continue;
+        }
+        for (; ref < sp; ref++) {
+            r = runloom_visit_stackref(ref, visit, arg, subtract);
+            if (r) return r;
+        }
+    }
+    return 0;
+}
+
+int runloom_gcvisit_cstack_chain(void *head, visitproc visit, void *arg, int subtract)
+{
+    _PyCStackRef *c = (_PyCStackRef *)head;
+    for (; c != NULL; c = c->next) {
+        int r = runloom_visit_stackref(&c->ref, visit, arg, subtract);
+        if (r) return r;
+    }
+    return 0;
+}
+
+#else   /* non-FT / pre-3.14: safe stubs so callers stay unconditional */
+
+int runloom_gc_world_stopped(void) { return 0; }
+int runloom_gc_in_subtract_pass(PyObject *self) { (void)self; return 0; }
+int runloom_gcvisit_frame_chain(void *top, visitproc visit, void *arg, int subtract)
+{ (void)top; (void)visit; (void)arg; (void)subtract; return 0; }
+int runloom_gcvisit_cstack_chain(void *head, visitproc visit, void *arg, int subtract)
+{ (void)head; (void)visit; (void)arg; (void)subtract; return 0; }
+
+#endif  /* RUNLOOM_GCFRAMES_HAVE */

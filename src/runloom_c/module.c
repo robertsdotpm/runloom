@@ -196,4 +196,5 @@ static void runloom_coro_rearm_stackprot(runloom_coro_t *c)
 #include "module_advice.c.inc"
 #include "module_select.c.inc"
 #include "module_machinecode.c.inc"
+#include "module_gcframes.c.inc"
 #include "module_init.c.inc"

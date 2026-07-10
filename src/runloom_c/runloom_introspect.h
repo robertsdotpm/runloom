@@ -71,6 +71,20 @@ void runloom_introspect_reset_after_fork(void);
 void runloom_greg_link(runloom_g_t *g);
 void runloom_greg_unlink(runloom_g_t *g);
 
+/* STOP-THE-WORLD-ONLY, lock-free read of the registry head.  Used only by the
+ * GC frames anchor's tp_traverse (module_gcframes.c.inc), which runs under STW
+ * where every mutator is stopped at a safepoint and the registry is frozen --
+ * so it reads runloom_greg_head and walks reg_next without taking
+ * runloom_greg_lock (which a stopped mutator could be holding, deadlocking the
+ * collector).  MUST NOT be called outside STW.  Reads NULL when the registry is
+ * uninitialised.  The registry is memory-safety load-bearing while the anchor is
+ * active: RUNLOOM_GREG_OFF must not blind it (see runloom_gcframes_init). */
+runloom_g_t *runloom_greg_head_for_gc(void);
+
+/* True iff the registry is currently linked (not ablated via RUNLOOM_GREG_OFF).
+ * The anchor consults this at init to refuse to run blind. */
+int runloom_greg_is_linked(void);
+
 /* Per-incarnation fiber id, Go's goid analogue.  Contention-free:
  * a per-thread counter ORed with a per-thread base, so spawning on many
  * hubs never touches a shared cacheline.  Unique for the process life. */

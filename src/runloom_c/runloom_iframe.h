@@ -115,6 +115,57 @@ struct runloom_coro;
 void runloom_arm_fiber_stackprot(PyThreadState *ts, struct runloom_coro *c);
 #endif
 
+/* ---- GC visibility for parked-fiber frames (free-threaded 3.14+) ----
+ *
+ * The free-threaded GC credits PEP-703 deferred-refcount stackrefs (f_executable
+ * code objects, f_funcobj functions, deferred locals) held on a thread's stack
+ * ONLY by walking live tstates' current_frame chains (gc_visit_thread_stacks).
+ * A PARKED runloom fiber's suspended _PyInterpreterFrame chain lives in
+ * datastack chunks referenced only by g->snap -- invisible to every tstate,
+ * hence to the collector.  Objects whose only remaining references are deferred
+ * stackrefs in a parked frame are then freed early; the fiber resumes, uses, and
+ * re-frees them -> per-thread mimalloc free-list corruption -> SIGSEGV (the
+ * big_100 p565/p524 TLBC-on crash).  The fix (module_gcframes.c.inc) is a single
+ * GC-tracked "frames anchor" whose tp_traverse -- run only under stop-the-world
+ * -- walks the fiber registry and visits every parked chain, exactly as CPython
+ * would for a live one.  These helpers do the layout-dependent visiting and so
+ * live in this Py_BUILD_CORE-isolated TU; the anchor + registry iteration (which
+ * needs no internal layout) lives in module_gcframes.c.inc.  All are compiled to
+ * safe stubs (returning 0) on non-FT / pre-3.14 builds.  See greenlet PR #511,
+ * from which the per-frame visit set is transcribed. */
+
+/* True iff a stop-the-world pause is in progress on this interpreter.  The
+ * anchor traverse acts only under STW (where every registry and every snap is
+ * frozen); a concurrent gc.get_referents()/get_referrers() call must see
+ * nothing.  Returns 0 on non-core builds. */
+int runloom_gc_world_stopped(void);
+
+/* True iff `self` (the anchor) is being traversed in the GC's update_refs
+ * SUBTRACT pass (visit == visit_decref) rather than a propagation pass.  On
+ * 3.14 the collector's visit_decref is a static symbol we cannot compare
+ * against, so we detect the pass via the anchor's own _PyGC_BITS_UNREACHABLE
+ * bit (set immediately before update_refs' tp_traverse, clear in every
+ * propagation pass).  Deferred stackrefs must be SKIPPED in the subtract pass
+ * (they are not part of the refcount; visiting would double-subtract and free
+ * live objects) and visited in every other pass.  See runloom_iframe.c for the
+ * full derivation.  3.14.x-only; on 3.15+ the exported visitors self-discriminate
+ * and this is unused.  Returns 0 on non-core builds. */
+int runloom_gc_in_subtract_pass(PyObject *self);
+
+/* Visit every reference held by a suspended interpreter-frame chain whose top is
+ * `top` (an opaque struct _PyInterpreterFrame*, e.g. a saved snap->current_frame),
+ * greenlet-PR#511-style: for each FRAME_OWNED_BY_THREAD frame, visit frame_obj +
+ * f_locals (strong) and f_funcobj + f_executable + the localsplus..stackpointer
+ * window (deferred-aware).  `subtract` is runloom_gc_in_subtract_pass()'s result.
+ * MUST NOT allocate or free (the subtract-pass call site runs inside the GC's
+ * heap walk).  Returns the first non-zero visit result (to abort), else 0.
+ * No-op on non-FT / pre-3.14. */
+int runloom_gcvisit_frame_chain(void *top, visitproc visit, void *arg, int subtract);
+
+/* Visit a privatized _PyCStackRef chain (a parked fiber's snap->c_stack_refs).
+ * Same contract as runloom_gcvisit_frame_chain. */
+int runloom_gcvisit_cstack_chain(void *cstack_head, visitproc visit, void *arg, int subtract);
+
 #ifdef __cplusplus
 }
 #endif

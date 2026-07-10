@@ -295,6 +295,23 @@ long runloom_fiber_count(void)
     return n;
 }
 
+/* STW-only, lock-free registry head read for the GC frames anchor.  See the
+ * header: the collector has stopped every mutator at a safepoint, so the list is
+ * frozen and taking runloom_greg_lock (possibly held by a stopped mutator) would
+ * deadlock the pause.  A relaxed load suffices under STW; publication ordering of
+ * link/unlink is enforced by the lock those writers hold, and the STW barrier is
+ * a full fence between the last mutator write and this read. */
+runloom_g_t *runloom_greg_head_for_gc(void)
+{
+    if (!runloom_greg_inited) return NULL;
+    return runloom_greg_head;
+}
+
+int runloom_greg_is_linked(void)
+{
+    return runloom_greg_inited && !runloom_greg_off();
+}
+
 /* Count fibers owned by `owner` parked on a channel or via park_safe --
  * the "blocked on each other" set.  At a quiescent drain exit (no ready /
  * sleep / netpoll / io / blockpool work left) these are unwakeable: a

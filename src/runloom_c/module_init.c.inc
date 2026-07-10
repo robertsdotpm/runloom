@@ -682,6 +682,21 @@ PyMODINIT_FUNC PyInit_runloom_c(void)
             return NULL;
         }
     }
+    /* GC frames anchor: makes parked-fiber frames visible to the free-threaded
+     * collector so TLBC (the specializing interpreter) can run without the
+     * p565/p524 deferred-stackref UAF.  Must init after the Coro/G types and the
+     * introspect registry (both above).  Expose whether it activated as
+     * `gc_frames_active` -- runtime.py's TLBC interlock reads it: TLBC stays ON
+     * only when the anchor is live (else it keeps the PYTHON_TLBC=0 re-exec). */
+    if (runloom_gcframes_init(m) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
+    if (PyModule_AddIntConstant(m, "gc_frames_active",
+                                runloom_gcframes_active()) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
     /* Install the blockpool worker-thread teardown hook so each offload worker
      * releases the persistent Python tstate it lazily created (see
      * py_blocking_worker) on its own thread at exit -- before any worker starts
