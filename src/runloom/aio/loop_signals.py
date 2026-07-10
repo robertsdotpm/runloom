@@ -9,6 +9,13 @@ class _LoopSignalMixin(object):
             raise ValueError("add_signal_handler() can only be called from the "
                              "main thread")
         self._check_closed()
+        # Validate the signal up-front (asyncio contract): a non-int is a
+        # TypeError, an out-of-range int a ValueError -- NOT the RuntimeError the
+        # signal.signal() fallback below would surface.
+        if not isinstance(sig, int):
+            raise TypeError("sig must be an int, not %r" % (sig,))
+        if sig not in _signal.valid_signals():
+            raise ValueError("invalid signal number %d" % sig)
         handle = _Handle(callback, args, self)
         if not hasattr(self, "_signal_handlers"):
             self._signal_handlers = {}
@@ -88,6 +95,12 @@ class _LoopSignalMixin(object):
 
     def remove_signal_handler(self, sig):
         import signal as _signal
+        # Validate the signal first (asyncio contract), before the membership
+        # check -- an invalid sig must raise, not quietly return False.
+        if not isinstance(sig, int):
+            raise TypeError("sig must be an int, not %r" % (sig,))
+        if sig not in _signal.valid_signals():
+            raise ValueError("invalid signal number %d" % sig)
         handlers = getattr(self, "_signal_handlers", None)
         if not handlers or sig not in handlers:
             return False

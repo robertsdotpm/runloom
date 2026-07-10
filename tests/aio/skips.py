@@ -24,7 +24,9 @@ GH96704 = ("gh-96704: the bridge runs the exception handler in the outer context
 EV_SELECTOR_REDUNDANT = ("redundant selector variant -- identical to "
                          "SelectEventLoopTests once the loop is runloom "
                          "(selector-independent)")
-EV_MULTIHOST = "multi-host create_server bind-error handling divergence"
+EV_MULTIHOST = ("test mocks asyncio's internal socket.socket()/getsockbyname "
+                "create_server bind loop, which runloom's create_server does not "
+                "mirror; runloom binds real multi-host servers fine")
 EV_NEW_PROCESS = ("HANGS: run_in_executor(ProcessPoolExecutor) never completes "
                   "on the runloom loop")
 
@@ -54,18 +56,14 @@ SKIPS = {
         "EPollEventLoopTests.*": EV_SELECTOR_REDUNDANT,
         "PollEventLoopTests.*": EV_SELECTOR_REDUNDANT,
 
-        # --- Canonical class (SelectEventLoopTests) divergences ---------------
-        # Signal handlers not implemented on the loop.
-        "SelectEventLoopTests.test_add_signal_handler":
-            "loop signal handlers unimplemented",
-
-        # Tests reach into stock-loop internals the runloom loop doesn't mirror.
+        # --- Canonical class (SelectEventLoopTests) remaining divergences -----
+        # These few tests reach into asyncio-internal structure the runloom loop
+        # deliberately does not mirror (mock-driven or private-attribute tests),
+        # NOT real runloom behavior gaps -- so they are left skipped by design.
         "SelectEventLoopTests.test_timeout_rounding":
             "test reads loop._run_once (stock-loop internal the runloom loop doesn't mirror)",
         "SelectEventLoopTests.test_prompt_cancellation":
             "test reads loop._stop_serving (stock-loop internal the runloom loop doesn't mirror)",
-
-        # Multi-host create_server bind-error handling divergence.
         "SelectEventLoopTests.test_create_server_multiple_hosts_ipv4": EV_MULTIHOST,
         "SelectEventLoopTests.test_create_server_multiple_hosts_ipv6": EV_MULTIHOST,
 
