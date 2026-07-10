@@ -76,7 +76,7 @@ fi
 phases=("$@")
 [ ${#phases[@]} -eq 0 ] && phases=(tests mn replay lincheck dst ctest)
 if [ "${phases[0]}" = all ]; then
-  phases=(tests mn replay lincheck dst ctest static sanitizers exttsan verify ctxcheck dbgnetpoll migdelay chess ftconform mr combo security refleak racerd)
+  phases=(tests mn replay lincheck dst ctest static sanitizers exttsan verify ctxcheck dbgnetpoll migdelay chess ftconform aioconform mr combo security refleak racerd)
 fi
 
 rc=0
@@ -168,6 +168,20 @@ for ph in "${phases[@]}"; do
       hr "STW (M2) trace conformance -- real CPython stop-the-world vs the model"
       tools/stw_conform_ci.sh || rc=1
       ;;
+    aioconform)
+      hr "Vendored CPython asyncio suite on the runloom bridge (tests/aio/, full)"
+      # tests/aio/ = pinned CPython test_asyncio bodies run on RunloomEventLoop,
+      # green on the DEFAULT bridge (divergences skipped in tests/aio/skips.py).
+      # Per-file subprocess isolation (run_isolated --suite aio); NOT in the
+      # default `tests` phase (discover() scans tests/ top-level only), so it runs
+      # only here (extensive) + the lean aioconform-fast slice.
+      PYTHON_GIL=0 PYTHONPATH=src "$PYTHON" tests/run_isolated.py --suite aio || rc=1
+      ;;
+    aioconform-fast)
+      hr "Vendored asyncio bridge conformance -- lean slice (fast gate)"
+      PYTHON_GIL=0 PYTHONPATH=src "$PYTHON" tests/run_isolated.py --suite aio \
+          test_sock_lowlevel.py test_server.py test_buffered_proto.py test_locks.py || rc=1
+      ;;
     bench)
       hr "Rigorous microbench sweep (informational -- bootstrap CIs)"
       PYTHON="$PYTHON" bash tools/bench/bench.sh || rc=1
@@ -207,7 +221,7 @@ for ph in "${phases[@]}"; do
       PYTHON="$PYTHON" tools/racerd.sh || rc=1
       ;;
     *)
-      echo "unknown phase: $ph (want: tests mn replay lincheck dst ctest static sanitizers exttsan verify verify-fast ctxcheck dbgnetpoll migdelay chess ftconform mr bench combo security refleak racerd all)"; rc=2 ;;
+      echo "unknown phase: $ph (want: tests mn replay lincheck dst ctest static sanitizers exttsan verify verify-fast ctxcheck dbgnetpoll migdelay chess ftconform aioconform aioconform-fast mr bench combo security refleak racerd all)"; rc=2 ;;
   esac
 done
 

@@ -52,6 +52,10 @@ SLOW_FILES = {
     "test_stress.py": 600,
     "test_mn.py": 600,
     "test_workloads.py": 600,
+    # vendored asyncio conformance (tests/aio/): the big modules
+    "test_tasks.py": 400,
+    "test_events.py": 400,
+    "test_taskgroups.py": 300,
 }
 
 # Files that assert tight wall-clock UPPER bounds to *prove* cooperative
@@ -98,16 +102,26 @@ def _default_jobs():
         return 4
 
 
+# Subdirectory of tests/ to run (set by --suite).  "" = tests/ itself.  A
+# subsuite (e.g. tests/aio/, the vendored asyncio conformance) is discovered and
+# run with the SAME per-file subprocess isolation as the top-level suite.
+SUITE = ""
+
+
+def suite_dir():
+    return os.path.join(HERE, SUITE) if SUITE else HERE
+
+
 def discover():
     out = []
-    for name in sorted(os.listdir(HERE)):
+    for name in sorted(os.listdir(suite_dir())):
         if name.startswith("test_") and name.endswith(".py"):
             out.append(name)
     return out
 
 
 def run_file(name, pytest_args):
-    path = os.path.join(HERE, name)
+    path = os.path.join(suite_dir(), name)
     timeout = (SLOW_FILES.get(name, DEFAULT_TIMEOUT)) * TIMEOUT_MULT
     env = dict(os.environ)
     env["PYTHON_GIL"] = "0"
@@ -197,8 +211,14 @@ def main(argv):
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    # Split argv into (file names that exist in tests/), -j/--jobs, and
-    # pytest pass-through.
+    # Split argv into (file names that exist in the suite), -j/--jobs, and
+    # pytest pass-through.  --suite <name> selects a tests/<name>/ subsuite.
+    global SUITE
+    argv = list(argv)
+    if "--suite" in argv:
+        i = argv.index("--suite")
+        SUITE = argv[i + 1]
+        del argv[i:i + 2]
     files, passthru = [], []
     known = set(discover())
     jobs = _default_jobs()
