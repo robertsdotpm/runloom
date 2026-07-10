@@ -85,32 +85,10 @@ SKIPS = {
         "SelectEventLoopTests.test_create_server_multiple_hosts_ipv4": EV_MULTIHOST,
         "SelectEventLoopTests.test_create_server_multiple_hosts_ipv6": EV_MULTIHOST,
 
-        # --- Leak-victim TAIL classes (skipped wholesale) --------------------
-        # These are the get_event_loop-policy + Server-ABC tests that run AFTER
-        # the real-I/O EventLoop tests.  A create_connection test earlier in the
-        # module leaves current-task / running-loop state on the runloom loop
-        # ("Cannot enter into task while another is being executed"), which wedges
-        # these tail classes when the whole module runs in order (they pass in
-        # isolation).  They exercise asyncio's get_event_loop()/policy machinery
-        # and the AbstractServer ABC -- NOT runloom's loop I/O -- so the runloom
-        # coverage lost is ~nil.  Skipped by class rather than whack-a-mole per
-        # test.  (The leftover-current-task cleanup is a minor real bridge quirk;
-        # not fixed here -- this suite runs on the DEFAULT bridge.  It also covers
-        # the ProcessPoolExecutor run_in_executor hang, EV_NEW_PROCESS.)
-        "TestPyGetEventLoop.*":
-            "leak-victim tail: get_event_loop-policy tests hang in full-module "
-            "order from leftover current-task state (a prior create_connection); "
-            "not runloom loop-I/O; includes the ProcessPoolExecutor hang",
-        "TestCGetEventLoop.*":
-            "leak-victim tail: get_event_loop-policy tests hang in full-module "
-            "order from leftover current-task state (a prior create_connection); "
-            "not runloom loop-I/O; includes the ProcessPoolExecutor hang",
-        "TestServer.*":
-            "leak-victim tail: Server-ABC tests hang in full-module order from "
-            "leftover current-task state (a prior create_connection)",
-        "TestAbstractServer.*":
-            "leak-victim tail: AbstractServer-ABC tests hang in full-module order "
-            "from leftover current-task state (a prior create_connection)",
+        # (The get_event_loop-policy + Server-ABC tail classes used to be skipped
+        # wholesale here: an SSL-server test left current-task state on the loop
+        # that wedged them in full-module order.  Fixed by clearing the per-thread
+        # current-task slot at drive-end in loop_run._drive, so they run now.)
     },
 }
 

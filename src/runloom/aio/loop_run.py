@@ -42,6 +42,20 @@ class _LoopRunMixin(object):
             # create_task on this thread (loop not running) is treated as
             # foreign and deferred, not direct-spawned onto an undrained sched.
             self._pg_driver_tid = None
+            # The drive is over, so NO task is executing: the per-OS-thread
+            # current-task slot MUST be None.  Clear any residue left by a
+            # RunloomTask that parked mid-coro.send (its driver's restore-finally
+            # never ran) and was abandoned when the drive stopped -- otherwise the
+            # stale entry poisons the NEXT stock-asyncio Task step on this thread
+            # ("Cannot enter into task ... while another is being executed") and
+            # hangs its run_until_complete.  Must clear HERE, while `self` is still
+            # the running loop (_swap_current_task requires loop==running loop); a
+            # legitimately-parked task re-establishes its own slot on resume in
+            # _wait_fd.
+            try:
+                _pg_set_current_task(self, None)
+            except Exception:
+                pass
             asyncio._set_running_loop(None)
             # Retire the keepalive so it can't linger parked in the sleep queue
             # into the next run on this loop.
