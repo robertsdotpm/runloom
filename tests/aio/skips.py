@@ -25,7 +25,6 @@ EV_SELECTOR_REDUNDANT = ("redundant selector variant -- identical to "
                          "SelectEventLoopTests once the loop is runloom "
                          "(selector-independent)")
 EV_PIPE_HANG = "pipe/PTY transport HANGS on the runloom loop"
-EV_XTHREAD_HANG = "cross-thread call_soon_threadsafe HANGS on the runloom loop"
 EV_MULTIHOST = "multi-host create_server bind-error handling divergence"
 EV_NEW_PROCESS = ("HANGS: run_in_executor(ProcessPoolExecutor) never completes "
                   "on the runloom loop")
@@ -66,14 +65,6 @@ SKIPS = {
         "SelectEventLoopTests.test_write_pty": EV_PIPE_HANG,
         "SelectEventLoopTests.test_write_pipe": EV_PIPE_HANG,
         "SelectEventLoopTests.test_write_pipe_disconnect_on_close": EV_PIPE_HANG,
-
-        # call_soon_threadsafe from a foreign thread deadlocks.
-        "SelectEventLoopTests.test_call_soon_threadsafe_handle_block_cancellation":
-            EV_XTHREAD_HANG,
-        "SelectEventLoopTests.test_call_soon_threadsafe_handle_block_check_cancelled":
-            EV_XTHREAD_HANG,
-        "SelectEventLoopTests.test_call_soon_threadsafe_handle_cancel_other_thread":
-            EV_XTHREAD_HANG,
 
         # Tests reach into stock-loop internals the runloom loop doesn't mirror.
         "SelectEventLoopTests.test_timeout_rounding":

@@ -5,6 +5,12 @@ from .futures import RunloomFuture  # noqa: F401
 from .handles import _Handle, _TimerHandle  # noqa: F401
 from .tasks import RunloomTask  # noqa: F401
 
+# CPython 3.14 made loop.call_soon_threadsafe return an events._ThreadSafeHandle
+# (a Handle subclass whose cancel()/cancelled() take an RLock that _run holds for
+# the whole callback, so a foreign thread's cancel BLOCKS until it finishes).
+# Return that shape when present; None on 3.13t leaves the old plain-_Handle path.
+_ThreadSafeHandle = getattr(asyncio.events, "_ThreadSafeHandle", None)
+
 
 class _DeferredSpawn(object):
     """A foreign thread's PRE-RUN call_soon/create_task, deferred into
@@ -186,7 +192,15 @@ class _LoopScheduleMixin(object):
         # context=), so a contextvar set by the caller propagates to the drained
         # callback -- this is how anyio's portal carries the caller-thread
         # context into a run_coroutine_threadsafe-spawned task.
-        handle = _Handle(callback, args, self, context)
+        if _ThreadSafeHandle is not None:
+            handle = _ThreadSafeHandle(callback, args, self, context)
+            # asyncio's own class -- no _Handle.__init__ strip -- so its __init__
+            # frame is still on top; strip it too (the _Handle path does this in
+            # handles.py).
+            if handle._source_traceback:
+                del handle._source_traceback[-1]
+        else:
+            handle = _Handle(callback, args, self, context)
         if handle._source_traceback:
             del handle._source_traceback[-1]  # strip this call_soon_threadsafe frame
         with self._ts_lock:
@@ -212,6 +226,24 @@ class _LoopScheduleMixin(object):
                 except BaseException as e:
                     self.call_exception_handler(
                         {"message": "pre-run deferred spawn", "exception": e})
+                continue
+            if _ThreadSafeHandle is not None and isinstance(handle, _ThreadSafeHandle):
+                # Hold the handle's RLock across the run so a foreign thread's
+                # cancel()/cancelled() blocks until the callback finishes, exactly
+                # like asyncio's _ThreadSafeHandle._run.  Still route through
+                # _pg_run_loop_cb to preserve "loop-level callback has no current
+                # task".
+                with handle._lock:
+                    if handle._cancelled:
+                        continue
+                    try:
+                        self._pg_run_loop_cb(handle._context, handle._callback,
+                                             handle._args)
+                    except (KeyboardInterrupt, SystemExit) as e:
+                        self._pg_signal_fatal(e)
+                    except BaseException as e:
+                        self.call_exception_handler(
+                            {"message": "call_soon_threadsafe callback", "exception": e})
                 continue
             if handle._cancelled:
                 continue
