@@ -5,7 +5,7 @@ from .tls_bio import _MemoryBIOTLS  # noqa: F401
 from .tls_wrap import _tls_wrap_client  # noqa: F401
 from .transport_datagram import _create_datagram_endpoint  # noqa: F401
 from .transport_server import _ProtocolServer  # noqa: F401
-from .transport_stream import _StreamTransport  # noqa: F401
+from .transport_stream import _StreamTransport, _SSLStreamTransport  # noqa: F401
 
 class _LoopNetMixin(object):
     async def create_datagram_endpoint(self, protocol_factory, **kw):
@@ -73,7 +73,8 @@ class _LoopNetMixin(object):
             sock = _tls_wrap_client(sock, ssl, server_hostname, host,
                                     ssl_handshake_timeout)
         protocol = protocol_factory()
-        transport = _StreamTransport(sock, protocol, loop=self)
+        tr_cls = _SSLStreamTransport if ssl is not None else _StreamTransport
+        transport = tr_cls(sock, protocol, loop=self)
         return transport, protocol
 
     async def create_server(self, protocol_factory, host=None, port=None, *,
@@ -234,7 +235,8 @@ class _LoopNetMixin(object):
             sock = _tls_wrap_client(sock, ssl, server_hostname, None,
                                     ssl_handshake_timeout)
         protocol = protocol_factory()
-        transport = _StreamTransport(sock, protocol, loop=self)
+        tr_cls = _SSLStreamTransport if ssl is not None else _StreamTransport
+        transport = tr_cls(sock, protocol, loop=self)
         return transport, protocol
 
     async def sendfile(self, transport, file, offset=0, count=None, *,

@@ -5,6 +5,19 @@ class _ReadPipeTransport(asyncio.ReadTransport):
     """connect_read_pipe transport: a fiber parks on the pipe fd via wait_fd
     (cooperative, no OS thread) and feeds protocol.data_received; EOF ->
     eof_received + connection_lost."""
+
+    def __repr__(self):
+        # Mirror asyncio's _UnixReadPipeTransport.__repr__ (the runloom loop has
+        # no _selector, so the open pipe reports 'open').
+        info = [self.__class__.__name__]
+        if self._pipe is None:
+            info.append("closed")
+        elif self._closing:
+            info.append("closing")
+        info.append("fd={0}".format(self._fd))
+        info.append("open" if self._pipe is not None else "closed")
+        return "<{0}>".format(" ".join(info))
+
     def __init__(self, loop, pipe, protocol):
         self._loop = loop
         self._pipe = pipe
@@ -156,6 +169,18 @@ class _WritePipeTransport(asyncio.WriteTransport):
     pipe fd via wait_fd (cooperative, no OS thread); connection_lost fires on
     close/EOF/error.  Implements the asyncio watermark flow-control contract so
     StreamWriter.drain() blocks until the backlog flushes or the pipe breaks."""
+
+    def __repr__(self):
+        # Mirror asyncio's _UnixWritePipeTransport.__repr__ (no _selector -> open).
+        info = [self.__class__.__name__]
+        if self._pipe is None:
+            info.append("closed")
+        elif self._closing:
+            info.append("closing")
+        info.append("fd={0}".format(self._fd))
+        info.append("open" if self._pipe is not None else "closed")
+        return "<{0}>".format(" ".join(info))
+
     def __init__(self, loop, pipe, protocol):
         self._loop = loop
         self._pipe = pipe

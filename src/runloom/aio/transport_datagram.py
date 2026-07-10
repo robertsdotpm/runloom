@@ -1,16 +1,19 @@
 """DatagramTransport + _create_datagram_endpoint (UDP)."""
 from ._base import *  # noqa: F401,F403  (shared foundation)
 
-class DatagramTransport(asyncio.DatagramTransport):
+class DatagramTransport(asyncio.Transport, asyncio.DatagramTransport):
     """asyncio.DatagramTransport-compatible transport.
 
     Wires a UDP socket to a user-supplied DatagramProtocol.  The
     protocol's datagram_received(data, addr) / error_received(exc) /
     connection_lost(exc) methods are called from our recv fiber.
 
-    Subclasses asyncio.DatagramTransport (not plain object) so
-    isinstance(tr, asyncio.DatagramTransport)/asyncio.BaseTransport
-    type-dispatch in libraries succeeds, exactly as under stock asyncio.
+    Subclasses BOTH asyncio.Transport and asyncio.DatagramTransport (as the
+    stock _SelectorDatagramTransport does via its concrete bases) so
+    isinstance(tr, asyncio.Transport) AND isinstance(tr, asyncio.DatagramTransport)
+    /asyncio.BaseTransport type-dispatch succeed, exactly as under stock asyncio.
+    (The abstract transports are plain `type`, not ABCMeta, so this adds only
+    inherited NotImplementedError bodies -- no method a UDP transport uses.)
     """
 
     def __init__(self, sock, protocol, *, loop=None):
@@ -221,7 +224,23 @@ async def _create_datagram_endpoint(loop, protocol_factory, local_addr=None,
                          "as the usage of SO_REUSEPORT in UDP poses a "
                          "significant security concern.")
     if sock is None:
-        if local_addr is None and remote_addr is None:
+        # getaddrinfo-resolve local_addr/remote_addr (asyncio parity): a caller
+        # may pass a hostname or a STRING port (e.g. from getnameinfo with
+        # NI_NUMERICSERV), which sock.bind/connect reject; resolution turns them
+        # into a numeric sockaddr and pins the address family.
+        resolved = {}
+        for idx, addr in ((0, local_addr), (1, remote_addr)):
+            if addr is not None:
+                infos = await loop.getaddrinfo(
+                    addr[0], addr[1], family=family,
+                    type=_socket.SOCK_DGRAM, proto=proto, flags=flags)
+                if not infos:
+                    raise OSError("getaddrinfo() returned empty list")
+                af, _t, pr, _cn, sa = infos[0]
+                resolved[idx] = (af, pr, sa)
+        if resolved:
+            family, proto = resolved.get(0, resolved.get(1))[0:2]
+        else:
             family = family or _socket.AF_INET
         if family == 0:
             family = _socket.AF_INET
@@ -232,10 +251,10 @@ async def _create_datagram_endpoint(loop, protocol_factory, local_addr=None,
         if allow_broadcast:
             sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_BROADCAST, 1)
         if local_addr is not None:
-            sock.bind(local_addr)
+            sock.bind(resolved[0][2])
         if remote_addr is not None:
             try:
-                sock.connect(remote_addr)
+                sock.connect(resolved[1][2])
             except BlockingIOError:
                 _wait_fd(sock.fileno(), 2)
     else:

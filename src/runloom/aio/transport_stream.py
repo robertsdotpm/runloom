@@ -381,3 +381,11 @@ class _StreamTransport(_StreamIOMixin, asyncio.Transport):
                 "message": "StreamTransport " + where + " raised",
                 "exception": exc,
             })
+
+
+class _SSLStreamTransport(_StreamTransport):
+    """Behaviourally identical to _StreamTransport; exists only so its
+    __class__.__name__ contains "ssl", matching stock asyncio's
+    _SSLProtocolTransport.  create_connection/create_unix_connection return this
+    for ssl= connections (the TLS itself is already handled by _tls_wrap_client /
+    tls_bio._MemoryBIOTLS before construction).  test_events keys on the name."""

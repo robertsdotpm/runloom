@@ -15,6 +15,7 @@ Injection covers every way a test_asyncio module obtains a loop:
 The vendored bodies are untouched, so they stay diffable against CPython upstream.
 """
 import asyncio
+import os
 import unittest
 import warnings
 
@@ -63,7 +64,11 @@ def pytest_collection_modifyitems(config, items):
         if mod is not None and id(mod) not in patched:
             patch_module_loops(mod)
             patched.add(id(mod))
-    # Apply the committed skip baseline (green on the default bridge).
+    # Apply the committed skip baseline (green on the default bridge).  Set
+    # RUNLOOM_AIO_NOSKIP=1 to run the raw divergences (for closing the gaps: see
+    # exactly what each skipped test needs before/while fixing the bridge).
+    if os.environ.get("RUNLOOM_AIO_NOSKIP"):
+        return
     for it in items:
         mod = getattr(it, "module", None)
         cls = getattr(it, "cls", None)

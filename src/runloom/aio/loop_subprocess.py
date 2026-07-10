@@ -29,6 +29,11 @@ class _LoopSubprocessMixin(object):
     async def subprocess_exec(self, protocol_factory, program, *args,
                               stdin=_subprocess.PIPE, stdout=_subprocess.PIPE,
                               stderr=_subprocess.PIPE, **kwargs):
+        # asyncio contract: subprocess_exec must not be given shell=True (mirrors
+        # base_events).  Pop it so a falsy value is accepted-and-dropped instead
+        # of colliding with the hardcoded shell=False below.
+        if kwargs.pop("shell", False):
+            raise ValueError("shell must be False")
         _reject_subprocess_text_mode(kwargs)
         protocol = protocol_factory()
         transport = await self._make_subprocess(
@@ -39,6 +44,11 @@ class _LoopSubprocessMixin(object):
     async def subprocess_shell(self, protocol_factory, cmd,
                                stdin=_subprocess.PIPE, stdout=_subprocess.PIPE,
                                stderr=_subprocess.PIPE, **kwargs):
+        # asyncio contract: cmd must be a str/bytes and shell must not be False.
+        if not isinstance(cmd, (bytes, str)):
+            raise ValueError("cmd must be a string")
+        if not kwargs.pop("shell", True):
+            raise ValueError("shell must be True")
         _reject_subprocess_text_mode(kwargs)
         protocol = protocol_factory()
         transport = await self._make_subprocess(

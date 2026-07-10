@@ -24,13 +24,8 @@ GH96704 = ("gh-96704: the bridge runs the exception handler in the outer context
 EV_SELECTOR_REDUNDANT = ("redundant selector variant -- identical to "
                          "SelectEventLoopTests once the loop is runloom "
                          "(selector-independent)")
-EV_SSL = "loop SSL transport not wired"
-EV_SUBPROCESS = ("subprocess transport unimplemented -- invalid-args validation "
-                 "raises TypeError, not the expected ValueError")
 EV_PIPE_HANG = "pipe/PTY transport HANGS on the runloom loop"
 EV_XTHREAD_HANG = "cross-thread call_soon_threadsafe HANGS on the runloom loop"
-EV_DATAGRAM = ("runloom DatagramTransport is not an asyncio.transports.Transport "
-               "subclass (type-identity divergence)")
 EV_CLOSE = ("op after loop close() does not raise RuntimeError on the bridge "
             "(add/remove-fds-after-close divergence)")
 EV_MULTIHOST = "multi-host create_server bind-error handling divergence"
@@ -76,14 +71,6 @@ SKIPS = {
         "SelectEventLoopTests.test_add_signal_handler":
             "loop signal handlers unimplemented",
 
-        # SSL transport not wired into the loop.
-        "SelectEventLoopTests.test_create_ssl_connection": EV_SSL,
-        "SelectEventLoopTests.test_create_ssl_unix_connection": EV_SSL,
-
-        # Subprocess transport unimplemented.
-        "SelectEventLoopTests.test_subprocess_exec_invalid_args": EV_SUBPROCESS,
-        "SelectEventLoopTests.test_subprocess_shell_invalid_args": EV_SUBPROCESS,
-
         # Pipe / PTY transport deadlocks on the runloom loop.
         "SelectEventLoopTests.test_bidirectional_pty": EV_PIPE_HANG,
         "SelectEventLoopTests.test_write_pty": EV_PIPE_HANG,
@@ -103,19 +90,6 @@ SKIPS = {
             "test reads loop._run_once (stock-loop internal the runloom loop doesn't mirror)",
         "SelectEventLoopTests.test_prompt_cancellation":
             "test reads loop._stop_serving (stock-loop internal the runloom loop doesn't mirror)",
-
-        # DatagramTransport type-identity divergence.
-        "SelectEventLoopTests.test_create_datagram_endpoint": EV_DATAGRAM,
-        "SelectEventLoopTests.test_create_datagram_endpoint_ipv6": EV_DATAGRAM,
-        "SelectEventLoopTests.test_create_datagram_endpoint_sock": EV_DATAGRAM,
-
-        # create_server exposes the raw socket, not a trsock.TransportSocket.
-        "SelectEventLoopTests.test_create_server_trsock":
-            "server.sockets holds a raw socket, not asyncio.trsock.TransportSocket",
-
-        # Pipe-transport repr lacks the 'open' state text.
-        "SelectEventLoopTests.test_unclosed_pipe_transport":
-            "pipe-transport repr lacks the 'open' state text",
 
         # Operating on the loop after close() does not raise RuntimeError.
         "SelectEventLoopTests.test_add_fds_after_closing": EV_CLOSE,

@@ -256,7 +256,9 @@ class _ProtocolServer(object):
     def sockets(self):
         if self._closed or self._sockets is None:
             return ()
-        return tuple(self._sockets)
+        # Expose asyncio.trsock.TransportSocket wrappers (read-only introspection
+        # views), like stock asyncio.Server.sockets -- not the raw listeners.
+        return tuple(asyncio.trsock.TransportSocket(s) for s in self._sockets)
 
     async def __aenter__(self):
         return self
