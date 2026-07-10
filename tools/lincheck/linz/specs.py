@@ -184,6 +184,12 @@ class Semaphore(Model):
                 return True, free - n
             return False, free
         if op == "release":
+            # BOUNDED semaphore: you cannot release more than is held, so free
+            # never exceeds capacity.  A recorded successful release that would
+            # push free past capacity is an over-release the real primitive would
+            # have raised on -- i.e. a linearizability violation, not a valid step.
+            if free + n > self.capacity:
+                return False, free
             return True, free + n
         return False, free
 

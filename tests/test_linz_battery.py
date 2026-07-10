@@ -89,6 +89,20 @@ class TestCheckerTeeth:
              op(2, ("acquire", 1), ("ok",), 2, 7)]
         assert not checker.check(s, h).linearizable
 
+    def test_semaphore_over_release_rejected(self):
+        # BOUNDED semaphore: a release that pushes held permits past capacity is
+        # an over-release the real primitive raises on -> must NOT linearize.
+        s = specs.Semaphore(2)
+        # grant 3 permits on a cap-2 sem via an over-release
+        assert not checker.check(s, [op(0, ("release", 3), ("ok",), 0, 1),
+                                     op(1, ("acquire", 3), ("ok",), 2, 3)]).linearizable
+        # 4 permits held simultaneously on cap-2
+        assert not checker.check(s, [op(0, ("release", 2), ("ok",), 0, 1),
+                                     op(1, ("acquire", 2), ("ok",), 2, 7),
+                                     op(2, ("acquire", 2), ("ok",), 3, 6)]).linearizable
+        # bare release with nothing held
+        assert not checker.check(s, [op(0, ("release", 1), ("ok",), 0, 1)]).linearizable
+
     def test_waitgroup_early_wait_rejected(self):
         wg = specs.WaitGroup()
         h = [op(0, ("add", 2), ("ok",), 0, 1), op(1, ("wait",), ("ok",), 2, 3)]

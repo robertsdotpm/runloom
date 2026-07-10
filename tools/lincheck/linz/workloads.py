@@ -157,17 +157,22 @@ def build_waitgroup(seed, hubs, procs, ops, cap, rec):
     for g in range(ngor):
         rec.register(g)
     gate = runloom_c.Chan(kw)             # workers wait for the add to be visible
+    wgate = runloom_c.Chan(nwait)         # waiters start ONLY after add -> count>0
 
     def controller(gid):
         rec.timed(gid, "add", [kw], lambda: wg.add(kw), cls_void)
-        for _ in range(kw):
-            gate.send(1)                  # release workers only after add
+        for _ in range(nwait):
+            wgate.send(1)                 # release waiters first: counter is kw>0,
+        for _ in range(kw):               # so their wait() genuinely BLOCKS (not a
+            gate.send(1)                  # trivial count==0 return), then workers.
 
     def worker(gid):
         gate.recv()
+        runloom_c.sched_yield_classic()   # let the waiters park on wait() first
         rec.timed(gid, "add", [-1], lambda: wg.done(), cls_void)
 
     def waiter(gid):
+        wgate.recv()
         rec.timed(gid, "wait", [], lambda: wg.wait(), cls_void)
 
     thunks = [(0, (lambda: controller(0)))]

@@ -142,6 +142,16 @@ def check_seed(primitive, seed, seeded, procs, ops, hubs, budget, verbose):
         payload2, err2 = record_one(primitive, seed, seeded, procs, ops, hubs)
         if err2:
             return "ERROR", "2nd run: %s" % err2
+        # Check run 2 for linearizability too: a Co* wake-order interleaving can
+        # differ between draws, so a non-linearizable outcome might surface only
+        # on the second sampling -- don't leave it unchecked.
+        res2 = checker.check(spec, checker.ops_from_events(payload2["events"], spec),
+                             budget=budget)
+        if res2.verdict == checker.NOT_LINEARIZABLE:
+            return "NONLIN", "seed=%d (run 2) %d ops NOT linearizable | history=%s" % (
+                seed, res2.nops, json.dumps(payload2["events"]))
+        if res2.verdict == checker.UNKNOWN:
+            return "UNKNOWN", "seed=%d (run 2) %s" % (seed, res2.detail)
         if observable(events) != observable(payload2["events"]):
             if primitive in SEED_DETERMINISTIC:
                 return "NONDET", ("seed=%d observable history not reproducible "
