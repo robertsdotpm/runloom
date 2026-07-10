@@ -169,7 +169,21 @@ class _LoopCoreMixin(object):
     def call_exception_handler(self, context):
         if self._exception_handler is not None:
             try:
-                self._exception_handler(self, context)
+                # gh-96704: run the handler in the failing task/future/handle's
+                # contextvars Context, so it observes the contextvars that
+                # callback set (mirrors asyncio.BaseEventLoop.call_exception_handler).
+                thing = context.get("task")
+                if thing is None:
+                    thing = context.get("future")
+                if thing is None:
+                    thing = context.get("handle")
+                ctx = (thing.get_context()
+                       if thing is not None and hasattr(thing, "get_context")
+                       else None)
+                if ctx is not None and hasattr(ctx, "run"):
+                    ctx.run(self._exception_handler, self, context)
+                else:
+                    self._exception_handler(self, context)
                 return
             except Exception:
                 pass
