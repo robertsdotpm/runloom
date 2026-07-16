@@ -1,22 +1,27 @@
 # M:N parallelism
 
-The default runloom scheduler runs **all** fibers on a single OS
-thread.  This is the right model for I/O-bound work -- there's no
-contention, no synchronisation, no cache-line ping-pong, and context
-switches are 80 ns of asm.
+Runloom has two different scheduler models. One is single-threaded.
+It's intended purely for running legacy asyncio code on. The other
+is multi-threaded. You don't need to do anything special to choose
+the scheduler. When you call runloom.run the first parameter is the
+thread number.
 
-But if you have CPU-bound fibers that you want to spread across
-multiple cores, you need OS threads.  runloom's **M:N scheduler** (M
-fibers, N hub threads, work-stealing) gives you that on
-free-threaded Python 3.14t (or 3.13t).
+runloom.run(1, ...) -- one thread, single-threaded scheduler.
+
+runloom.run(2, ..) -- multi-threaded, work-stealing scheduler.
+
+When its set to >= 2 it gives you the speed up of multiple threads.
+That's what this entire project is about. Leveraging multiple threads
+in a dynamic, resilient model, to over-come the limitations of blocking
+haulting the entire program in a single thread.
 
 ## When to use M:N
 
 **Use it when:**
 
+- You want fiber-cheap parallelism without thread-pool ceremony.
 - You're running CPU-bound fibers (hashing, parsing, computation)
   and have a free-threaded 3.13t build.
-- You want fiber-cheap parallelism without thread-pool ceremony.
 
 **Skip it when:**
 
@@ -25,46 +30,7 @@ free-threaded Python 3.14t (or 3.13t).
 - All your work is I/O-bound -- a single OS thread with netpoll
   saturates an NIC easily; M:N adds overhead without benefit.
 
-## API surface
-
-```python
-import runloom
-
-runloom.mn_init(n=8)         # start 8 hub threads
-                                # n defaults to cpu_count() if omitted
-
-runloom.mn_fiber(fn)            # spawn a fiber on a round-robin hub
-                                # returns a G handle
-
-runloom.mn_run()             # wait for everyone; returns total completed
-
-runloom.mn_fini()            # tear down the hub pool
-```
-
-The M:N scheduler is separate from the single-threaded one; you call
-`mn_*` rather than `go`/`run`.
-
-## Example: parallel SHA-256
-
-```python
-import hashlib, time, runloom
-
-DATA = b"x" * 4096
-N = 100
-ITERS = 5_000
-
-def hash_loop():
-    for _ in range(ITERS):
-        hashlib.sha256(DATA).digest()
-
-runloom.mn_init(n=8)
-t0 = time.time()
-for _ in range(N):
-    runloom.mn_fiber(hash_loop)
-runloom.mn_run()
-print("8 hubs:", time.time() - t0, "s")
-runloom.mn_fini()
-```
+## Performance
 
 Measured on 3.13t (GIL disabled, Linux x86_64, 8 cores):
 
@@ -227,7 +193,7 @@ practice this evens out under steady load.
 ```python
 runloom.mn_stats()
 # {'hubs': 8,
-#  'ready_per_hub': [3, 0, 2, 1, 0, 0, 4, 0],
+#  'ready_per_hub': [3, 0, 2, 1, 0, 0, 4, 0], 
 #  'completed_per_hub': [12431, 9854, ...],
 #  'steals': 47,
 #  ...}
