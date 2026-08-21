@@ -1,0 +1,37 @@
+# runloom-tests -- build the runloom C extension against the provided patched
+# interpreter and run runloom's own suite.  These are the two REQUIRED phases
+# that run identically whether the interpreter was built here or downloaded, so
+# they live in one composable step consumed by every path.
+#
+# The interpreter is located via the $RL_CI_WORK/pybin-<version>-<platform>.txt
+# breadcrumb that provide-cpython wrote (test_patched_cpython.sh reads it), so no
+# path needs to be threaded in.
+name: runloom-tests
+description: Build the runloom extension and run the runloom suite against a provided CPython.
+inputs:
+  version:
+    description: CPython version, major.minor.patch (must match provide-cpython).
+    required: true
+  timeout-mult:
+    description: run_isolated deadline scaler for slow shared runners.
+    required: false
+    default: "2"
+runs:
+  using: composite
+  steps:
+    - name: Build runloom extension (${{ inputs.version }})
+      shell: bash
+      run: tools/ci/test_patched_cpython.sh "${{ inputs.version }}" --only=build-ext
+
+    - name: Run runloom tests (${{ inputs.version }})
+      shell: bash
+      env:
+        # Widen run_isolated deadlines on small shared runners so timing-sensitive
+        # scheduler tests do not false-fail under load (kept modest -- a genuine
+        # deadlock still fails in ~300s*mult per file, inside the job cap).
+        RUNLOOM_TIMEOUT_MULT: ${{ inputs.timeout-mult }}
+        # Marks a shared hosted runner: environment-sensitive assertions (stack
+        # HWM, hard wall-clock overlap bounds) self-skip with a TODO(runloom) at
+        # the skip site.  The REQUIRED steps stay hard gates.
+        RUNLOOM_CI: "1"
+      run: tools/ci/test_patched_cpython.sh "${{ inputs.version }}" --only=runloom-tests

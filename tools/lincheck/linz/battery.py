@@ -33,8 +33,12 @@ import checker  # noqa: E402
 import specs    # noqa: E402
 
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
-PY = os.environ.get("RUNLOOM_PYTHON",
-                    os.path.expanduser("~/.pyenv/versions/3.14.4t/bin/python3"))
+# Record against the interpreter running the battery (sys.executable) by default,
+# so this works on ANY build: a hosted CI runner, a release prefix, or a dev
+# pyenv.  Set RUNLOOM_PYTHON to record against a DIFFERENT interpreter than the
+# caller.  (Previously hard-coded to ~/.pyenv/versions/3.14.4t/bin/python3, which
+# only existed on the dev box -- CI hit FileNotFoundError.)
+PY = os.environ.get("RUNLOOM_PYTHON", sys.executable)
 ALL = ["chan", "mutex", "rwmutex", "semaphore", "waitgroup", "event"]
 
 # Primitives whose seeded history is bit/observably reproducible: the native

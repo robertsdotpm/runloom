@@ -1,13 +1,30 @@
 # CPython patches for runloom
 
-Cross-hub fiber migration needs **both** patches below. They fix independent
+Cross-hub fiber migration needs **both** halves below. They fix independent
 halves of the same root cause — free-threaded CPython ties a running frame to
 one OS thread in two separate ways — and either alone still corrupts:
 
-| half | patch | flag | what it decouples |
-|---|---|---|---|
-| **allocation** | `cpython313t-tstate-alloc-home.patch` | `Py_TSTATE_ALLOC_HOME` | which heap a migrated fiber allocates on |
-| **execution** | `cpython314t-tstate-exec-home.patch` | `Py_TSTATE_EXEC_HOME` | whether the compiler may cache *which OS thread we are* |
+| half | flag | what it decouples |
+|---|---|---|
+| **allocation** | `Py_TSTATE_ALLOC_HOME` | which heap a migrated fiber allocates on |
+| **execution** | `Py_TSTATE_EXEC_HOME` | whether the compiler may cache *which OS thread we are* |
+
+Each half ships as a **version-specific** patch, and they are **not**
+interchangeable — take the pair matching your interpreter:
+
+| target | allocation | execution |
+|---|---|---|
+| **CPython 3.14.4t** | `cpython314t-tstate-alloc-home.patch` | `cpython314t-tstate-exec-home.patch` |
+| **CPython 3.13.13t** | `cpython313t-tstate-alloc-home.patch` | `cpython313t-tstate-exec-home.patch` |
+
+All four apply at **zero fuzz** (`patch -p1 -F0`) to their pinned release, and
+`tools/ci/check_patches.sh` enforces that in seconds. The cross-version deltas
+are not cosmetic: 3.14 reordered `_PyThreadStateImpl` and rewrote the mimalloc
+page-reclaim path, so the 3.14 alloc-home patch **drops** two hunks upstream has
+since superseded and **adds** one relaxing an assert that alloc-home makes false.
+See each patch's `WHAT CHANGED` header. Applying the other series' patch with
+`-F3` can fuzz those superseded hunks back in and yield a silently wrong
+interpreter — so don't.
 
 `runloom.migration_available()` is True only with both; `runloom.migration_status()`
 reports which half is missing. With either absent, migration stays behind the
@@ -205,17 +222,17 @@ tstate — see alloc-home — not through it).
 Migration is **off by default**. To enable it you need two things: build CPython with
 **both** patches, and set the flag.
 
-1. **Build CPython with both patches.** `tools/build_migration_cpython.sh` does the
-   whole thing — fetch, patch, configure, build, install, create a venv, build
-   runloom into it, and assert both halves report present:
+1. **Build CPython with both patches.** `tools/ci/build_patched_cpython.sh` does
+   the whole thing — fetch the pinned release, verify its sha256, apply the pair
+   at zero fuzz, configure, build, install, and assert both halves report present:
    ```sh
-   tools/build_migration_cpython.sh          # PY_VER / PREFIX / VENV_DIR overridable
+   tools/ci/build_patched_cpython.sh 314      # or 313; pins live in tools/ci/versions.env
    ```
-   By hand:
+   By hand, for 3.14 (use the `313` files on 3.13 — they are not interchangeable):
    ```sh
    cd cpython
-   patch -p1 -F3 < .../patches/cpython313t-tstate-alloc-home.patch   # 3.13-era context
-   patch -p1     < .../patches/cpython314t-tstate-exec-home.patch
+   patch -p1 -F0 < .../patches/cpython314t-tstate-alloc-home.patch
+   patch -p1 -F0 < .../patches/cpython314t-tstate-exec-home.patch
    ./configure --disable-gil CPPFLAGS="-DPy_TSTATE_ALLOC_HOME -DPy_TSTATE_EXEC_HOME"
    # ALSO put both #defines in pyconfig.h -- CPPFLAGS covers only the CPython
    # build, while extension modules include the INSTALLED pyconfig.h.  alloc-home
@@ -224,12 +241,14 @@ Migration is **off by default**. To enable it you need two things: build CPython
    printf '#define Py_TSTATE_ALLOC_HOME 1\n#define Py_TSTATE_EXEC_HOME 1\n' >> pyconfig.h
    make && make install
    ```
-   The alloc-home patch predates 3.14 and needs `-F3` there; even with fuzz its
-   `_PyThreadStateImpl_AllocHome` accessor hunk is rejected, and must be pasted in
-   by hand after `} _PyThreadStateImpl;` in `pycore_tstate.h`. Check with
-   `grep -q _PyThreadStateImpl_AllocHome Include/internal/pycore_tstate.h` before
-   building — the bootstrap script fails loudly on this, by hand you get a silently
-   half-patched interpreter.
+   Use `-F0` and treat any reject as a hard stop. Both flags are armed in
+   `pyconfig.h` independently of whether the hunks landed, so a half-patched tree
+   **advertises** the features while lacking them. Verify with the compile-time
+   witnesses before building — this is what the CI's `rl_verify_witnesses` checks:
+   ```sh
+   grep -q _Py_TID_ASM Include/object.h                            # exec-home
+   grep -q _PyThreadStateImpl_AllocHome Include/internal/pycore_tstate.h  # alloc-home
+   ```
 
    Then build runloom against that interpreter (`python setup.py build_ext --inplace`),
    **and rebuild every other extension module you load** — `_Py_ThreadId()` inlines

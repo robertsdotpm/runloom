@@ -1,0 +1,70 @@
+# provide-cpython -- make a patched, free-threaded CPython available to the
+# runloom steps, sourced EITHER by building it (and running the CPython stdlib
+# suite) OR by downloading the last matching release.  This is the single
+# composable "provide the interpreter" step; the caller only decides the source.
+#
+#   source: build     -> build_patched_cpython.sh + stdlib suite   (the slow path)
+#   source: prebuilt  -> fetch_prebuilt_cpython.sh                 (the fast path)
+#                        falls back to build+suite if no matching release exists
+#
+# Both paths leave the interpreter in the same prefix and write the same
+# $RL_CI_WORK/pybin-<version>-<platform>.txt breadcrumb, so the downstream
+# runloom-tests action consumes whichever ran without caring which it was.
+#
+# Requires (set once at job level, inherited here): RL_CI_WORK,
+# RL_CI_RELEASE_PREFIX, RL_CI_TEST_TIMEOUT.  macOS OpenSSL is resolved here.
+name: provide-cpython
+description: Build+test a patched CPython, or reuse the latest matching release.
+inputs:
+  version:
+    description: CPython version, major.minor.patch (e.g. 3.14.4).
+    required: true
+  source:
+    description: "'build' (build + stdlib suite) or 'prebuilt' (download last matching release)."
+    required: true
+  github-token:
+    description: Token for `gh release download` on the prebuilt path.
+    required: false
+    default: ""
+outputs:
+  built:
+    description: "'true' if CPython was built from source this run (stdlib suite ran), 'false' if a prebuilt was reused."
+    value: ${{ steps.provide.outputs.built }}
+runs:
+  using: composite
+  steps:
+    - name: Provide CPython ${{ inputs.version }} (${{ inputs.source }})
+      id: provide
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -eu
+        V="${{ inputs.version }}"
+
+        # macOS: point configure at Homebrew OpenSSL so _ssl / _hashlib build
+        # (else test_ssl et al. only skip and the released interpreter has no TLS).
+        EXTRA=""
+        if [ "${{ runner.os }}" = "macOS" ]; then
+          EXTRA="--with-openssl=$(brew --prefix openssl@3)"
+        fi
+
+        build_and_test() {
+          RL_CI_CONFIGURE_EXTRA="$EXTRA" tools/ci/build_patched_cpython.sh "$V"
+          tools/ci/test_patched_cpython.sh "$V" --only=cpython
+          echo "built=true" >> "$GITHUB_OUTPUT"
+        }
+
+        if [ "${{ inputs.source }}" = "build" ]; then
+          echo "::group::build patched CPython $V + CPython stdlib suite"
+          build_and_test
+          echo "::endgroup::"
+        elif tools/ci/fetch_prebuilt_cpython.sh "$V"; then
+          echo "reused a prebuilt release for $V -- skipped source build + stdlib suite"
+          echo "built=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning::no matching prebuilt release for $V; falling back to a full build"
+          echo "::group::fallback build patched CPython $V + CPython stdlib suite"
+          build_and_test
+          echo "::endgroup::"
+        fi

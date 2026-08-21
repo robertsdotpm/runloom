@@ -1,0 +1,165 @@
+# CPython 3.13t OPTIONAL feature patch: thread-state EXECUTION home
+#   build flag:  -DPy_TSTATE_EXEC_HOME      (OFF by default)
+#   pinned to:   Python-3.13.13  (applies at ZERO fuzz: patch -p1 -F0)
+#
+# This is the 3.13 port of cpython314t-tstate-exec-home.patch.  Same feature,
+# same flag, same _Py_TID_ASM witness -- see that file's header for the full
+# WHAT/WHY, the codegen evidence, the measured cost, and the caveats (no LTO, do
+# not annotate _PyThreadState_GetCurrent() pure/const, MSVC intrinsics not
+# covered).  All of that applies here unchanged.
+#
+# WHAT CHANGED vs the 3.14 patch: nothing semantic.  The one hunk that rejects
+# is the _Py_ThreadId() asm block, for two purely textual reasons:
+#
+#   1. 3.14 rewrote the asm templates to carry MSVC-dialect alternates, e.g.
+#          3.13:  __asm__("movq %%gs:0, %0" : "=r" (tid));
+#          3.14:  __asm__("{movq %%gs:0, %0|mov %0, qword ptr gs:[0]}" ...);
+#      so every template literal differs.
+#   2. 3.13's __x86_64__ arm is indented with THREE spaces, not four
+#      (upstream whitespace slip, fixed in 3.14).  Preserved here verbatim so
+#      the hunk applies at zero fuzz.
+#
+# The transformation itself is identical: each __asm__ that READS the thread
+# pointer becomes _Py_TID_ASM.  The two `register uintptr_t tp __asm__ ("r13")`
+# / `("r2")` register constraints are deliberately NOT converted -- they are
+# register bindings, not reads, and __volatile__ on them is meaningless.
+#
+# The pycore_pystate.h and Python/pystate.c hunks are unchanged from the 3.14
+# patch and apply to 3.13.13 as-is.
+#
+# APPLY BOTH FILES' WORTH OF HUNKS: as on 3.14, Py_TSTATE_EXEC_HOME is armed in
+# pyconfig.h independently of whether the patch landed, so a partial build
+# advertises the feature while lacking it.  Check by hand with:
+#     grep _Py_TID_ASM Include/object.h
+#
+# ZERO IMPACT BY DEFAULT: with the flag undefined _Py_TID_ASM expands to plain
+# __asm__ and _PyThreadState_GET() keeps its inline thread-local read.  No ABI
+# change.
+#
+# ENABLE: ./configure --disable-gil CPPFLAGS=-DPy_TSTATE_EXEC_HOME
+#         (also add the #define to pyconfig.h so extension modules agree)
+#         Required alongside cpython313t-tstate-alloc-home.patch.
+# APPLY:  from the CPython source root:  patch -p1 -F0 < this-file
+# SCOPE:  Include/object.h, Include/internal/pycore_pystate.h, Python/pystate.c
+#
+--- a/Include/object.h
++++ b/Include/object.h
+@@ -237,6 +237,21 @@
+ #if defined(Py_GIL_DISABLED) && !defined(Py_LIMITED_API)
+ PyAPI_FUNC(uintptr_t) _Py_GetThreadLocal_Addr(void);
+ 
++/* Py_TSTATE_EXEC_HOME: volatile, so the thread-pointer read below cannot be
++   hoisted, CSE'd or deleted.  A stackful fiber (greenlet/runloom-style) can park
++   on one OS thread and resume on another carrying its C frames, so a cached tid
++   names the ORIGIN thread.  _Py_ThreadId() gates _Py_IsOwnedByCurrentThread(),
++   so a stale tid routes a refcount update down the non-atomic ob_ref_local path
++   from a thread that does not own the object -- losing updates when the true
++   owner does the same concurrently.  (Mechanism read off refcount.h; no failure
++   has been pinned on it.  Kept because it measures free and a lost refcount
++   update is silent.)  MSVC's intrinsic reads are not covered. */
++#ifdef Py_TSTATE_EXEC_HOME
++#  define _Py_TID_ASM __asm__ __volatile__
++#else
++#  define _Py_TID_ASM __asm__
++#endif
++
+ static inline uintptr_t
+ _Py_ThreadId(void)
+ {
+@@ -254,24 +269,24 @@
+ #elif defined(__MINGW32__) && defined(_M_ARM64)
+     tid = __getReg(18);
+ #elif defined(__i386__)
+-    __asm__("movl %%gs:0, %0" : "=r" (tid));  // 32-bit always uses GS
++    _Py_TID_ASM("movl %%gs:0, %0" : "=r" (tid));  // 32-bit always uses GS
+ #elif defined(__MACH__) && defined(__x86_64__)
+-    __asm__("movq %%gs:0, %0" : "=r" (tid));  // x86_64 macOSX uses GS
+-#elif defined(__x86_64__)
+-   __asm__("movq %%fs:0, %0" : "=r" (tid));  // x86_64 Linux, BSD uses FS
++    _Py_TID_ASM("movq %%gs:0, %0" : "=r" (tid));  // x86_64 macOSX uses GS
++#elif defined(__x86_64__)
++   _Py_TID_ASM("movq %%fs:0, %0" : "=r" (tid));  // x86_64 Linux, BSD uses FS
+ #elif defined(__arm__) && __ARM_ARCH >= 7
+-    __asm__ ("mrc p15, 0, %0, c13, c0, 3\nbic %0, %0, #3" : "=r" (tid));
++    _Py_TID_ASM ("mrc p15, 0, %0, c13, c0, 3\nbic %0, %0, #3" : "=r" (tid));
+ #elif defined(__aarch64__) && defined(__APPLE__)
+-    __asm__ ("mrs %0, tpidrro_el0" : "=r" (tid));
++    _Py_TID_ASM ("mrs %0, tpidrro_el0" : "=r" (tid));
+ #elif defined(__aarch64__)
+-    __asm__ ("mrs %0, tpidr_el0" : "=r" (tid));
++    _Py_TID_ASM ("mrs %0, tpidr_el0" : "=r" (tid));
+ #elif defined(__powerpc64__)
+     #if defined(__clang__) && _Py__has_builtin(__builtin_thread_pointer)
+     tid = (uintptr_t)__builtin_thread_pointer();
+     #else
+     // r13 is reserved for use as system thread ID by the Power 64-bit ABI.
+     register uintptr_t tp __asm__ ("r13");
+-    __asm__("" : "=r" (tp));
++    _Py_TID_ASM("" : "=r" (tp));
+     tid = tp;
+     #endif
+ #elif defined(__powerpc__)
+@@ -280,7 +295,7 @@
+     #else
+     // r2 is reserved for use as system thread ID by the Power 32-bit ABI.
+     register uintptr_t tp __asm__ ("r2");
+-    __asm__ ("" : "=r" (tp));
++    _Py_TID_ASM ("" : "=r" (tp));
+     tid = tp;
+     #endif
+ #elif defined(__s390__) && defined(__GNUC__)
+@@ -292,7 +307,7 @@
+     tid = (uintptr_t)__builtin_thread_pointer();
+     #else
+     // tp is Thread Pointer provided by the RISC-V ABI.
+-    __asm__ ("mv %0, tp" : "=r" (tid));
++    _Py_TID_ASM ("mv %0, tp" : "=r" (tid));
+     #endif
+ #else
+     // Fallback to a portable implementation if we do not have a faster
+--- a/Include/internal/pycore_pystate.h
++++ b/Include/internal/pycore_pystate.h
+@@ -136,9 +136,14 @@
+ static inline PyThreadState*
+ _PyThreadState_GET(void)
+ {
+-#if defined(HAVE_THREAD_LOCAL) && !defined(Py_BUILD_CORE_MODULE)
++#if defined(HAVE_THREAD_LOCAL) && !defined(Py_BUILD_CORE_MODULE) \
++    && !defined(Py_TSTATE_EXEC_HOME)
+     return _Py_tss_tstate;
+ #else
++    /* With Py_TSTATE_EXEC_HOME this is deliberately an out-of-line call:
++       the ADDRESS of the _Py_tss_tstate thread-local must be recomputed on the
++       OS thread that is running RIGHT NOW.  See the comment on
++       _PyThreadState_GetCurrent() in Python/pystate.c. */
+     return _PyThreadState_GetCurrent();
+ #endif
+ }
+--- a/Python/pystate.c
++++ b/Python/pystate.c
+@@ -105,7 +105,25 @@
+     if (tstate == current_fast_get()) { \
+         _Py_FatalErrorFormat(__func__, "tstate %p is still current", tstate); \
+     }
++
++/* Py_TSTATE_EXEC_HOME: out of line, and it must stay un-foldable.
++
++   Compilers treat "which thread am I" as loop-invariant and cache it across
++   calls -- clang -O2 caches the slot ADDRESS on Darwin/AArch64 and the loaded
++   VALUE on Linux x86-64/AArch64.  Sound for OS threads, whose stacks never move;
++   wrong for a stackful fiber that parks on one thread and resumes on another,
++   whose C frames travel with it.  Every inlined _PyThreadState_GET() in those
++   frames then resolves against the ORIGIN thread: NULL if it has since detached
++   (SIGSEGV in e.g. _Py_Dealloc -> _Py_RecursionLimit_GetMargin), or a
++   valid-but-WRONG tstate if it is running something else (silent corruption).
+ 
++   Three things keep this un-foldable and all are load-bearing: it is a real
++   cross-TU call, so do NOT build with LTO; it must NOT be annotated pure/const
++   (it looks eligible, and that would re-license exactly this folding);
++   Py_NO_INLINE covers callers inside this TU. */
++#ifdef Py_TSTATE_EXEC_HOME
++Py_NO_INLINE
++#endif
+ PyThreadState *
+ _PyThreadState_GetCurrent(void)
+ {

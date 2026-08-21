@@ -1,5 +1,10 @@
 # CPython 3.14t OPTIONAL feature patch: thread-state EXECUTION home
 #   build flag:  -DPy_TSTATE_EXEC_HOME      (OFF by default)
+#   pinned to:   Python-3.14.4  (applies at ZERO fuzz: patch -p1 -F0)
+#   series pair: this is the EXECUTION half for the 3.14 series.  The 3.13 port
+#                is cpython313t-tstate-exec-home.patch (NOT interchangeable --
+#                this one rejects on 3.13).  The matching ALLOCATION half is
+#                cpython314t-tstate-alloc-home.patch; migration needs BOTH.
 #
 # WHAT: stops the compiler caching "which OS thread is this frame running on".
 # Two reads carry that identity and both are covered:
@@ -79,7 +84,7 @@
 #
 # ENABLE: ./configure --disable-gil CPPFLAGS=-DPy_TSTATE_EXEC_HOME
 #         (also add the #define to pyconfig.h so extension modules agree)
-# APPLY:  from the CPython source root:  patch -p1 < this-file   (or git apply)
+# APPLY:  from the CPython source root:  patch -p1 -F0 < this-file
 # SCOPE:  Include/object.h, Include/internal/pycore_pystate.h, Python/pystate.c
 #
 --- a/Include/object.h

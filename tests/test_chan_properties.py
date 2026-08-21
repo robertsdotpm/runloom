@@ -21,6 +21,12 @@ import sys
 sys.path.insert(0, "src")
 
 import runloom_c
+import pytest
+
+# hypothesis needs a Rust/PyO3 core that has no free-threaded wheel below 3.14t,
+# so it cannot be installed there.  A missing optional TEST dependency is not a
+# failure -- skip the whole module cleanly instead of erroring at collection.
+hypothesis = pytest.importorskip("hypothesis")
 from hypothesis import given, settings, strategies as st
 
 SETTINGS = settings(max_examples=200, deadline=None)
