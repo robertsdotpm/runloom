@@ -859,6 +859,32 @@ static int runloom_mn_ctrl_census_idle(runloom_hub_t *h)
     RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
     has_work = (h->sub_head != NULL);
     RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
+    /* A hub with an ALREADY-DUE timer is a WANTER, not idle.
+     *
+     * The sub_list re-test above closes the cross-hub-wake window.  The timer
+     * plane had the identical window and was not covered: once a quiescent
+     * census advances the logical clock to T, the hub owning a sleeper due at T
+     * has work -- but that work is in its own sleep heap, drained at its loop
+     * top, NOT on sub_head.  Reaching census_idle before that drain made it
+     * report idle, so the round could complete without it, choose() granted
+     * elsewhere, and its fiber fired a round LATE.  Whether the hub reaches its
+     * loop top or the census first is decided by the OS, which is why this only
+     * showed up when hubs outnumber cores (a descheduled hub is late by
+     * definition) and only on darwin, where that is the common case on a 3-core
+     * runner at H=4.  It is the same "timing-decided outcome" the sub_list
+     * re-test exists to prevent.
+     *
+     * sleep_real entries are wall-clock sleepers (aio keepalive) that under sim
+     * deliberately never fire against the logical clock -- comparing one here
+     * would make a hub a permanent wanter and livelock the census, so the heap
+     * front only counts when it is a LOGICAL sleeper.  The peek is race-free:
+     * the hub owns its sleep heap. */
+    if (!has_work && h->sched.sleep_size > 0) {
+        runloom_g_t *pk = runloom_sched_sleep_peek(&h->sched);
+        if (pk != NULL && !pk->sleep_real &&
+            pk->wake_at <= runloom_mn_ctrl.logical_now)
+            has_work = 1;
+    }
     if (!has_work) {
         runloom_mn_ctrl.seen[hub] = runloom_mn_ctrl.round;   /* checked in (idle) */
         /* Report this hub's earliest pending timer so a quiescent census can
