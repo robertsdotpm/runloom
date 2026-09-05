@@ -45,6 +45,9 @@ on:
       version:
         description: "Pinned CPython (3.13.13 or 3.14.4)."
         default: "3.14.4"
+      runner:
+        description: "Runner image (macos-14, macos-15, macos-latest). Both open bugs are in the kqueue path, so the OS version is a variable worth controlling."
+        default: "macos-14"
 
 permissions:
   contents: read
@@ -56,13 +59,13 @@ permissions:
 # the SAME file set still supersedes its own previous run, which is what you
 # want when you have just pushed a fix for it.
 concurrency:
-  group: mac-loop-${{ github.ref }}-${{ inputs.version }}-${{ inputs.files }}
+  group: mac-loop-${{ github.ref }}-${{ inputs.runner }}-${{ inputs.version }}-${{ inputs.files }}
   cancel-in-progress: true
 
 jobs:
   loop:
-    runs-on: macos-14
-    name: "mac-loop ${{ inputs.version }} x${{ inputs.iterations }}"
+    runs-on: ${{ inputs.runner }}
+    name: "mac-loop ${{ inputs.runner }} ${{ inputs.version }} x${{ inputs.iterations }}"
     timeout-minutes: 90
     env:
       RL_CI_TEST_TIMEOUT: "1200"
