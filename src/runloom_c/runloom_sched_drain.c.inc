@@ -407,7 +407,26 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
              * such parker exists (genuinely idle / sleep-only) does the scheduler
              * carry the raised exception out of run_forever()/run_until_complete,
              * as stock asyncio does for Ctrl-C. */
-            if (runloom_sched_ready_empty(s) && PyErr_CheckSignals() < 0) {
+            /* PARKERS GET FIRST REFUSAL, even when a fiber was just re-queued.
+             *
+             * This used to be gated on `runloom_sched_ready_empty(s) &&`, so any
+             * fiber re-queued in this iteration -- an expired sleeper with no
+             * connection to the signal -- suppressed the probe entirely and then
+             * collected the KeyboardInterrupt in its own eval loop.  That is the
+             * macOS `test_signal_interrupts_parked_io` failure: with the client
+             * parked in send_all and the observer's sched_sleep expiring in the
+             * same iteration, the observer was re-queued, the probe was skipped,
+             * and the interrupt surfaced as "Exception ignored in: <function
+             * server>" while the fiber under test stayed parked forever.
+             *
+             * The shortcut is still honoured where it is actually correct: if a
+             * handler raised but NO wait_fd parker is eligible, the exception is
+             * RESTORED and the re-queued fiber's own eval loop delivers it, which
+             * is the CoPoll contract (select.poll has no backing fd, so it parks
+             * on a short sched_sleep and must receive its own signal).  So the
+             * only behaviour that changes is the one that was wrong: a parked
+             * cooperative recv/send_all now outranks an unrelated sleeper. */
+            if (PyErr_CheckSignals() < 0) {
                 PyErr_Fetch(&sig_t, &sig_v, &sig_b);
                 PyErr_NormalizeException(&sig_t, &sig_v, &sig_b);
                 if (sig_v != NULL && sig_b != NULL)
@@ -425,6 +444,15 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
                         continue;   /* the woken parker raises it in its own stack */
                     }
                     s->signal_exc = NULL;   /* no parker; carry it out of run() */
+                }
+                if (!runloom_sched_ready_empty(s)) {
+                    /* No eligible parker, but a fiber is runnable.  Put the
+                     * exception back so THAT fiber's eval loop raises it, which
+                     * is exactly what the old ready_empty gate produced -- the
+                     * CoPoll path is unchanged. */
+                    PyErr_Restore(sig_t, sig_v, sig_b);
+                    sig_t = sig_v = sig_b = NULL;
+                    continue;
                 }
                 sig_break = 1;
                 break;
