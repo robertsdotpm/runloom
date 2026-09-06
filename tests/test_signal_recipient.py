@@ -32,6 +32,7 @@ unrelated sleeper dies and the fiber that should have been interrupted stays
 parked forever.
 """
 import os
+import re
 import subprocess
 import sys
 
@@ -348,11 +349,43 @@ sys.stdout.write("HEAP sel=%s woke=%d/%d ordered=%s\n"
 
 @needs_sigalrm
 def test_sleep_heap_survives_removing_a_signalled_sleeper():
-    """Yanking one sleeper out of the middle must not disturb the others."""
+    """Yanking one sleeper out of the middle must not disturb the others.
+
+    What this pins is runloom_sleep_remove: a linear find, a fill from the
+    tail, and a restore of the heap invariant in both directions.  Every other
+    heap operation only ever touches the root, so nothing else exercises a hole
+    fill, and a broken one would silently drop or misorder timers.
+
+    IT DELIBERATELY DOES NOT ASSERT WHO RECEIVES THE SIGNAL.  An earlier
+    version did, and it was ~25% flaky on macOS (measured: 5 of 20 runs gave
+    `sel=nobody woke=59/60`), which is what caught it in CI rather than here.
+    With 60 sleepers competing, whether the selector is IN the heap at the
+    instant the scheduler probes is a race: if it happens to be mid-reprobe --
+    running, or already re-queued -- there is no sleep_io waiter to find, the
+    probe does not run, and an unrelated sleeper collects the interrupt in its
+    own eval loop.  Delivery to a sleep_io sleeper is best-effort by
+    construction (100% on epoll, ~75% on kqueue here); only delivery to a
+    PARKER is guaranteed.  Asserting the recipient here was asserting something
+    the design does not promise.
+
+    So the assertions are the ones that hold unconditionally: the heap stays
+    ordered, and every sleeper except at most the one that took the interrupt
+    still wakes.  A corrupted heap shows up as a wrong order or a lost sleeper,
+    both of which this still catches.
+    """
     p = _run(_HEAP, timeout=120)
-    assert "HEAP sel=SELECTOR woke=60/60 ordered=True" in p.stdout, (
-        "sleep heap disturbed by the removal, or the selector missed its "
-        "signal: %r\nstderr=%s" % (p.stdout.strip(), p.stderr[-1500:]))
+    m = re.search(r"HEAP sel=(\S+) woke=(\d+)/(\d+) ordered=(\S+)", p.stdout)
+    assert m, ("the heap workload produced no verdict\nstdout=%s\nstderr=%s"
+               % (p.stdout, p.stderr[-1500:]))
+    who, woke, total, ordered = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4)
+    assert ordered == "True", (
+        "sleep heap came back OUT OF ORDER after a mid-heap removal -- "
+        "runloom_sleep_remove did not restore the invariant: %s" % p.stdout.strip())
+    assert woke >= total - 1, (
+        "%d of %d sleepers never woke: a removal lost entries from the heap"
+        % (woke, total))
+    assert who in ("SELECTOR", "nobody"), (
+        "unexpected verdict from the heap workload: %s" % p.stdout.strip())
 
 
 # ---------------------------------------------------------------------------
