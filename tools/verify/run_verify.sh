@@ -25,6 +25,37 @@
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+# Interpreter for the Python lints below.  These are SOURCE-analysis tools --
+# they read this checkout's files and never import runloom -- so the interpreter
+# under test is irrelevant to them; all they need is a working python3 that has
+# their optional deps (tstate_manifest wants libclang).  Hence: prefer a system
+# python3, and fall back to the interpreter under test.
+#
+# The bug this replaces was assuming `python3` simply exists.  It does not on the
+# macOS CI runner, and because each lint is judged by its EXIT STATUS a missing
+# interpreter did not report itself -- it reported as TEN independent findings
+# (DRIFT / STUB-TRAP / KERNEL-DIVERGES / UNCALLED-FUNCTION / ...), one per lint,
+# reading exactly like ten real defects.  The only lint that "passed" there was
+# tsan_gold_drift, and only because it alone is judged on its OUTPUT with
+# `|| true` rather than on its status.
+PY=""
+for _cand in python3 python "${PYTHON:-}"; do
+    [ -n "$_cand" ] || continue
+    command -v "$_cand" >/dev/null 2>&1 || continue
+    # Require Python 3: `python` is still Python 2 on some systems, and it
+    # would pass a bare `import sys` probe and then fail every lint -- the same
+    # misleading-verdict trap this selection exists to close.
+    if "$_cand" -c 'import sys; sys.exit(0 if sys.version_info[0] >= 3 else 1)' \
+            >/dev/null 2>&1; then PY="$_cand"; break; fi
+done
+
+# Say so plainly rather than letting it surface as a wall of bogus verdicts.
+if [ -z "$PY" ]; then
+    echo "run_verify: no working Python found for the lints (tried python3, python, \$PYTHON)."
+    echo "            set PYTHON=/path/to/python3 -- scripts/check_all.sh exports it."
+    exit 2
+fi
 ROOT="$(cd "$HERE/../.." && pwd)"   # verify lives under tools/, so repo root is two up
 SPIN_DIR="$HERE/spin"
 CBMC_DIR="$HERE/cbmc"
@@ -54,7 +85,7 @@ if have python3; then
     for lint in cite_drift model_source_drift tlc_tmpdir_lint download_pin_lint; do
         [ -f "$HERE/$lint.py" ] || continue
         printf '  [lint] %-28s ' "$lint"
-        if python3 "$HERE/$lint.py" >"/tmp/runloom_$lint.log" 2>&1; then
+        if "$PY" "$HERE/$lint.py" >"/tmp/runloom_$lint.log" 2>&1; then
             echo "OK"; pass=$((pass + 1))
         else
             echo "DRIFT (see /tmp/runloom_$lint.log)"; fail=$((fail + 1)); FAILED="$FAILED $lint"
@@ -72,7 +103,7 @@ if have python3; then
     # they are not substitutes.
     if [ -f "$HERE/untrusted_diff_scan.py" ]; then
         printf '  [lint] %-28s ' "untrusted_scan"
-        if python3 "$HERE/untrusted_diff_scan.py" --tree \
+        if "$PY" "$HERE/untrusted_diff_scan.py" --tree \
                 >"/tmp/runloom_untrusted_scan.log" 2>&1; then
             echo "OK"; pass=$((pass + 1))
         else
@@ -91,7 +122,7 @@ if have python3; then
     # threshold, so a single C commit does not nag.
     if [ -f "$HERE/tsan_gold_drift.py" ]; then
         printf '  [lint] %-28s ' "tsan_gold_drift"
-        python3 "$HERE/tsan_gold_drift.py" >"/tmp/runloom_tsan_gold_drift.log" 2>&1 || true
+        "$PY" "$HERE/tsan_gold_drift.py" >"/tmp/runloom_tsan_gold_drift.log" 2>&1 || true
         if grep -q "WARNING" "/tmp/runloom_tsan_gold_drift.log"; then
             echo "OVERDUE (warning only -- gate not failed)"
             sed 's/^/      /' "/tmp/runloom_tsan_gold_drift.log"
@@ -105,7 +136,7 @@ if have python3; then
     # absent => SKIP (not fail) so the gate stays runnable off-Linux.
     if [ -f "$HERE/feature_gate_lint.py" ] && have cc; then
         printf '  [lint] %-28s ' "feature_gate"
-        python3 "$HERE/feature_gate_lint.py" >"/tmp/runloom_feature_gate.log" 2>&1
+        "$PY" "$HERE/feature_gate_lint.py" >"/tmp/runloom_feature_gate.log" 2>&1
         rc=$?
         if [ "$rc" = 0 ]; then
             echo "OK"; pass=$((pass + 1))
@@ -121,7 +152,7 @@ if have python3; then
     # hand model would bless fails here instead.  SKIPs cleanly off-Linux.
     if [ -f "$HERE/semantics/conformance.py" ] && have cc; then
         printf '  [lint] %-28s ' "semantics_conformance"
-        if python3 "$HERE/semantics/conformance.py" >"/tmp/runloom_semconform.log" 2>&1; then
+        if "$PY" "$HERE/semantics/conformance.py" >"/tmp/runloom_semconform.log" 2>&1; then
             echo "OK"; pass=$((pass + 1))
         else
             echo "KERNEL-DIVERGES (see /tmp/runloom_semconform.log)"
@@ -132,7 +163,7 @@ if have python3; then
     # the ratchet that keeps the stale-cache-vs-kernel class from spreading again.
     if [ -f "$HERE/fd_chokepoint_lint.py" ]; then
         printf '  [lint] %-28s ' "fd_chokepoint"
-        if python3 "$HERE/fd_chokepoint_lint.py" >"/tmp/runloom_fd_chokepoint.log" 2>&1; then
+        if "$PY" "$HERE/fd_chokepoint_lint.py" >"/tmp/runloom_fd_chokepoint.log" 2>&1; then
             echo "OK"; pass=$((pass + 1))
         else
             echo "SURFACE-SPREAD (see /tmp/runloom_fd_chokepoint.log)"
@@ -146,7 +177,7 @@ if have python3; then
     # perform had never happened, and its consumer had rotted too.
     if [ -f "$HERE/uncalled_lint.py" ]; then
         printf '  [lint] %-28s ' "uncalled"
-        if python3 "$HERE/uncalled_lint.py" >"/tmp/runloom_uncalled.log" 2>&1; then
+        if "$PY" "$HERE/uncalled_lint.py" >"/tmp/runloom_uncalled.log" 2>&1; then
             echo "OK"; pass=$((pass + 1))
         else
             echo "UNCALLED-FUNCTION (see /tmp/runloom_uncalled.log)"
@@ -158,7 +189,7 @@ if have python3; then
     # libclang is absent (returns 0 with a SKIP line).
     if [ -f "$HERE/tstate_manifest_lint.py" ]; then
         printf '  [lint] %-28s ' "tstate_manifest"
-        if python3 "$HERE/tstate_manifest_lint.py" >"/tmp/runloom_tstate_manifest.log" 2>&1; then
+        if "$PY" "$HERE/tstate_manifest_lint.py" >"/tmp/runloom_tstate_manifest.log" 2>&1; then
             grep -q "SKIP" "/tmp/runloom_tstate_manifest.log" && echo "SKIP (no libclang)" \
                 && skipped=$((skipped + 1)) || { echo "OK"; pass=$((pass + 1)); }
         else
