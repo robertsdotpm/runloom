@@ -281,7 +281,7 @@ runloom.aio.run(main())
 | `loop.create_datagram_endpoint` (UDP) | works |
 | SSL (`ssl=` keyword on `create_connection`/`create_server`) | works -- cooperative `SSLSocket` (client + server, ALPN, cert fingerprint) |
 | `loop.subprocess_*` | not implemented |
-| `signal.set_wakeup_fd` integration | not implemented |
+| `signal.set_wakeup_fd` integration | implemented (`aio/loop_signals.py`, `monkey/signals.py`); the C scheduler does not use it |
 
 If a missing feature is blocking you, file an issue.  Most asyncio
 extension points are mechanical to add given the existing scheduler

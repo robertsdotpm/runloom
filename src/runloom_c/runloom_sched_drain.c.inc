@@ -672,7 +672,22 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
      * have been consumed by the woken parker's wait_fd resume before we return.
      * If the drain somehow exits first (e.g. a concurrent sched_stop), don't
      * leak it -- and don't carry it out silently either; drop it (the parker it
-     * targeted is no longer being driven). */
+     * targeted is no longer being driven).
+     *
+     * DROPPING LOSES A Ctrl-C, and that is a deliberate trade, so here is what
+     * is known about how reachable it is.  On the single-thread plane it looks
+     * unreachable: signal_wake only commits after PyErr_CheckSignals raised,
+     * it wakes the parker and `continue`s, and the very next loop iteration
+     * pops that g from the ready ring -- nothing between those two points can
+     * set s->stopping, because no other fiber of this sched is running.  It
+     * needs a stop from ANOTHER thread landing inside that window, which I
+     * could not construct deterministically.  Two adjacent worries that are
+     * NOT this one, both measured on the fixed tree: a lone sched_sleep fiber
+     * still receives Ctrl-C in its own frame (who=sleeper 3/3), and the
+     * observer-steals-the-signal case is what the gate above now fixes.
+     * If you can build the cross-thread case, carrying it out of run() is
+     * probably right -- but measure first; this comment is the third
+     * generation of reasoning about this file that turned out to be wrong. */
     if (s->signal_exc != NULL) {
         Py_CLEAR(s->signal_exc);
     }
