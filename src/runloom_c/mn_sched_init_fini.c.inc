@@ -422,6 +422,17 @@ static void runloom_mn_hub_drain_leftovers(runloom_hub_t *h)
         g = runloom_sched_sleep_pop(&h->sched);
         if (g != NULL) { RUNLOOM_DROP_QREF(g); runloom_g_decref(g); }
     }
+    /* A signal committed to a fiber on this hub that never resumed to take it
+     * (the run was torn down first, or the g completed).  Drop it rather than
+     * leak the exception AND -- the part that actually bites -- rather than
+     * leave the delivery slot occupied: runloom_netpoll_signal_wake reserves
+     * that slot with a NULL->exc CAS, so a stale one makes every future signal
+     * to this hub skip it silently.  Hubs are reused across runs. */
+    {   PyObject *stale = __atomic_exchange_n(&h->sched.signal_exc, NULL,
+                                              __ATOMIC_ACQ_REL);
+        Py_XDECREF(stale);
+        h->sched.signal_target = NULL;
+    }
 #undef RUNLOOM_DROP_QREF
 }
 
@@ -1681,33 +1692,59 @@ Py_ssize_t runloom_mn_run(void)
              * sched) finds none eligible from here -- the documented
              * no-eligible-parker fallback is exactly "carry it out of run()".
              *
-             * THIS IS THE M:N SIGNAL GAP, and it is worth stating plainly
-             * because the single-thread plane no longer behaves this way.
-             * There, a raised handler is delivered INTO the fiber sitting in a
-             * cooperative blocking call, so its own try/except sees it (see the
-             * probe in runloom_sched_drain.c.inc).  Three classes of recipient
-             * can be served -- a netpoll parker, an io_uring completion waiter,
-             * and a sched_sleep_io reprobe sleeper -- and ALL THREE ARE KEYED
-             * ON THE CALLING SCHED, so none is reachable from here.  Under M:N
-             * no hub fiber is ever interrupted: an `except KeyboardInterrupt:`
-             * or a `finally:` inside a hub fiber does not run on Ctrl-C.
+             * SIGNALS NOW REACH HUB FIBERS -- but only those parked on an fd.
+             * The sigpoll above offers a raised handler to a parked fiber via
+             * runloom_netpoll_signal_wake before falling back to carry-out, so
+             * an `except KeyboardInterrupt:` / `finally:` inside a hub fiber
+             * runs, matching the single-thread plane.  The wake arm for hub
+             * parkers (runloom_mn_wake_g) had always been there; only the
+             * owner filter, keyed on the CALLING sched, kept it unreachable.
              *
-             * That is a MISSING CAPABILITY, NOT A BUG: delivery out of mn_run
-             * is reliable, loses nothing, and matches stock asyncio.  Closing
-             * it means making the signal stash cross-thread (s->signal_exc and
-             * s->signal_target are thread-confined and non-atomic today, which
-             * is a precondition the single-thread design relies on) and
-             * restoring an exception into a tstate attached to another hub --
-             * in this same path that already coordinates stop-the-world and
-             * per-g tstate attachment.  Nothing has needed it yet.  If you take
-             * it on, WRITE THE FAILING TEST FIRST: three attempts at the
-             * single-thread half were reverted for changing signal code without
-             * a reproducer.  docs/parallelism.md has the user-facing version.
+             * The main thread reserves a slot on the TARGET hub's sched before
+             * claiming the parker, never after: claiming first and then finding
+             * the slot busy would leave a parker CAS'd to WOKEN with nobody
+             * delivering, and the fiber would park forever (the bug fixed in
+             * 8af0d807, much easier to reintroduce here).  Every access to
+             * signal_exc is atomic because it is now written by one thread and
+             * read by another.
+             *
+             * TWO PATHS STILL CARRY OUT, and neither is a small extension:
+             *   - io_uring waiters: runloom_iou_sigwaiters is RUNLOOM_TLS, so
+             *     this thread cannot see a hub thread's list at all.  It needs
+             *     a different structure, not a different filter.
+             *   - sched_sleep_io sleepers (select.poll's reprobe):
+             *     runloom_sched_signal_wake_sleeper walks the CALLER's sleep
+             *     heap, and a hub's heap is mutated by its own thread
+             *     concurrently -- reaching it needs a lock that does not exist.
+             * tests/test_signal_recipient.py asserts BOTH: that an fd-parked
+             * hub fiber receives its signal, and that select.poll under M:N
+             * still does not.  Closing either gap should make that second test
+             * fail; flip it to the positive assertion then.
+             *
              * The still-running hubs are stopped by the caller's mn_fini, the
              * same as the RUNLOOM_DEADLOCK=raise early-return path below. */
             if ((++sigpoll & 0xfu) == 0) {
                 PyEval_RestoreThread(saved);
-                if (PyErr_CheckSignals() < 0) { sig_raised = 1; break; }
+                if (PyErr_CheckSignals() < 0) {
+                    /* A handler raised.  Offer it to a fiber parked in a
+                     * cooperative call on ANY hub first, so its own
+                     * try/except/finally runs -- the same contract the
+                     * single-thread plane provides.  Only if no hub fiber is
+                     * parked do we fall back to carrying it out of mn_run,
+                     * which is what this loop did unconditionally before. */
+                    PyObject *st = NULL, *sv = NULL, *sb = NULL;
+                    PyErr_Fetch(&st, &sv, &sb);
+                    PyErr_NormalizeException(&st, &sv, &sb);
+                    if (sv != NULL && sb != NULL) PyException_SetTraceback(sv, sb);
+                    if (sv != NULL && runloom_netpoll_signal_wake(sv)) {
+                        Py_XDECREF(st); Py_XDECREF(sb);
+                        saved = PyEval_SaveThread();
+                        continue;     /* delivered; the hub fiber raises it */
+                    }
+                    PyErr_Restore(st, sv, sb);
+                    sig_raised = 1;
+                    break;
+                }
                 saved = PyEval_SaveThread();
             }
         }

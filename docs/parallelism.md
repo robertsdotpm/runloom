@@ -181,12 +181,12 @@ sends to, you'll see scaling fall off.  Mitigations:
 - Use atomic counters or per-hub thread-local accumulators when the
   data doesn't need ordering.
 
-### Ctrl-C does not interrupt a hub fiber
+### Ctrl-C in a hub fiber
 
-This is only about **signals** -- Ctrl-C, `SIGALRM`, anything arriving from
-outside your program at a moment nobody chose. Exceptions your own code raises
-are unaffected: `try`/`except`/`finally` work inside a fiber exactly as they do
-anywhere else, under every scheduler.
+This section is only about **signals** -- Ctrl-C, `SIGALRM`, anything arriving
+from outside your program at a moment nobody chose. Exceptions your own code
+raises are unaffected: `try`/`except`/`finally` work inside a fiber exactly as
+they do anywhere else, under every scheduler.
 
 The question is where a Ctrl-C lands:
 
@@ -198,43 +198,50 @@ def worker():
         cleanup()                # <-- does this run?
 ```
 
-* `runloom.run(1, ...)` -- **yes.** The interrupt comes out of `recv()` in this
-  fiber, the same way it would out of a plain blocking `recv()` in a normal
-  Python program, and `cleanup()` runs.
-* `runloom.run(4, ...)` -- **no.** The `KeyboardInterrupt` is raised out of
-  `runloom.run(...)` itself. `cleanup()` never runs, and the fiber stays parked
-  until the hubs are stopped.
+**Yes, under both schedulers.** The interrupt comes out of `recv()` in that
+fiber, the same way it would out of a plain blocking `recv()` in a normal
+Python program, and `cleanup()` runs. `runloom.run(1, ...)` and
+`runloom.run(4, ...)` behave the same here.
 
-So under M:N, **do not rely on an `except KeyboardInterrupt:` or a `finally:`
-inside a fiber to release anything on Ctrl-C.** Release it from outside the
-fiber, or use `runloom.run(1, ...)` if you need that guarantee.
+That covers the cooperative calls that park on a file descriptor, which is most
+of them: `recv`, `send`/`send_all`, `accept`, `connect`, `select.select`, and
+`selectors.EpollSelector`.
 
-Nothing is silently swallowed either way -- under M:N the interrupt reliably
-comes out of `run()`, which is also what plain `asyncio` does. It is a missing
-capability, not a bug.
+#### Two paths still interrupt the run instead of the fiber
 
-#### Why it works on one scheduler and not the other
+Under M:N only, a fiber blocked in one of these does **not** receive the signal;
+it comes out of `runloom.run(...)` instead, and that fiber's `except`/`finally`
+does not run:
+
+* **`select.poll`** (`selectors.PollSelector`). A poll object has no file
+  descriptor of its own, so the wrapper reprobes on a short sleep, and the
+  machinery that finds a sleeper only searches the calling thread's own timers.
+* **io_uring completions**, when `RUNLOOM_TCPCONN_IOURING` or
+  `RUNLOOM_IOURING_LOOP` is enabled (both off by default). The list of waiting
+  fibers is thread-local, so another thread cannot see it.
+
+Nothing is lost either way -- the interrupt reliably arrives at `run()` -- but
+if you rely on a fiber's `finally:` to release something, use a
+descriptor-backed call, or `runloom.run(1, ...)`.
+
+#### How it works
 
 Skip this unless you are changing the scheduler.
 
 When a signal handler raises, the exception is created *wherever the handler
 runs* -- and CPython runs handlers on the main thread, at whatever bytecode
 boundary comes next, which is not necessarily the fiber that should receive it.
-So the scheduler has to pick a recipient BEFORE running the handler, and then
-hand the resulting exception to that fiber to raise on its own stack. Picking
-afterwards is not possible: the exception is already on the wrong stack and
+So the scheduler has to pick a recipient BEFORE running the handler, then hand
+the resulting exception to that fiber to raise on its own stack. Picking
+afterwards is not possible: the exception is already on the wrong stack, and
 moving it destroys it.
 
-The single-thread scheduler can do this for three kinds of blocked fiber: one
-parked on an fd (`recv`, `accept`, ...), one waiting on an io_uring completion,
-and one inside a `select.poll` reprobe loop. Each is found through the calling
-scheduler's own bookkeeping.
-
-Under M:N a hub fiber's bookkeeping belongs to *its hub's* scheduler, so the
-main thread cannot see any of the three, and `mn_run` falls back to carrying the
-exception out. Fixing that means sharing the signal state across threads and
-raising into a fiber attached to another hub -- in the same code path that
-coordinates stop-the-world pauses. It has not been needed yet.
+Under M:N the main thread makes that choice on behalf of a hub. It reserves a
+slot on the target hub's scheduler, claims the fiber's parker with the same
+atomic handshake the poller uses, and wakes it; the hub thread picks the
+exception up at the fiber's resume point. The reservation happens *before* the
+parker is claimed, so a target that is already holding a signal costs nothing --
+claiming first and then finding the slot busy would leave a fiber parked forever.
 
 ### Goroutine routing back to origin hub
 

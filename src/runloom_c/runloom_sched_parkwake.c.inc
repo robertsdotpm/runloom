@@ -877,9 +877,9 @@ static int runloom_sched_sleep_until_ex(runloom_sched_t *s, double wake_at, int 
      * consume the exception -- an unrelated sleep_io fiber resuming on its own
      * deadline must not take it. */
     if (s->signal_target == g) {
-        PyObject *exc = s->signal_exc;
+        PyObject *exc = __atomic_load_n(&s->signal_exc, __ATOMIC_ACQUIRE);
         s->signal_target = NULL;
-        s->signal_exc = NULL;
+        __atomic_store_n(&s->signal_exc, NULL, __ATOMIC_RELAXED);
         if (exc != NULL) {
             PyObject *tb = PyException_GetTraceback(exc);   /* new ref or NULL */
             /* PyErr_Restore steals all three refs. */

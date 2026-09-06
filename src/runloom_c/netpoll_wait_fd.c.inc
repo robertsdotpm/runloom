@@ -231,14 +231,11 @@ static void runloom_sigwake_at_arm_inject(runloom_g_t *current_g,
     PyErr_Fetch(&t, &v, &b);
     PyErr_NormalizeException(&t, &v, &b);
     if (v != NULL && b != NULL) PyException_SetTraceback(v, b);
-    if (own != NULL && own->signal_exc == NULL && v != NULL) {
-        own->signal_exc = v;                      /* steals Fetch's ref */
-        if (runloom_netpoll_signal_wake()) {
-            Py_XDECREF(t); Py_XDECREF(b);
-            fprintf(stderr, "[sigwake-fault] ARM site: signal_wake CLAIMED a parker\n");
-            return;
-        }
-        own->signal_exc = NULL;
+    (void)own;
+    if (v != NULL && runloom_netpoll_signal_wake(v)) {   /* steals v on success */
+        Py_XDECREF(t); Py_XDECREF(b);
+        fprintf(stderr, "[sigwake-fault] ARM site: signal_wake CLAIMED a parker\n");
+        return;
     }
     /* Refused: the drain would carry it out of run().  Restoring it here puts
      * it on the fiber that is mid-park, which is the nearest analogue -- and
@@ -248,7 +245,7 @@ static void runloom_sigwake_at_arm_inject(runloom_g_t *current_g,
 }
 #endif  /* SIGALRM */
 
-int runloom_netpoll_signal_wake(void)
+int runloom_netpoll_signal_wake(PyObject *exc)
 {
     runloom_sched_t *owner = runloom_sched_get();
     int pi;
@@ -260,10 +257,18 @@ int runloom_netpoll_signal_wake(void)
         if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
         RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
         for (p = pool->head; p != NULL; p = p->next) {
+            runloom_sched_t *tgt;
             int cur;
             if (p->g == NULL) continue;
-            if (p->g->owner != owner) { wrong_owner++; continue; }
+            /* Eligible: a parker of THIS sched (the single-thread plane), or any
+             * HUB parker -- a hub fiber's g->owner is its own hub's sched, so
+             * keying on the caller alone made every hub fiber unreachable and
+             * Ctrl-C could not interrupt one.  The wake below already had the
+             * hub arm (runloom_mn_wake_g); only this filter kept it dead. */
+            if (p->g->owner != owner && p->hub == NULL) { wrong_owner++; continue; }
+            if (p->g->owner == NULL) continue;
             seen++;
+            tgt = p->g->owner;
             if (dbg) {
                 int st = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
                 if (st == RUNLOOM_PARK_PARKED) parked++;
@@ -272,6 +277,26 @@ int runloom_netpoll_signal_wake(void)
             }
             /* Claim via the same commit CAS the pump/timeout/cancel use, so
              * exactly one waker wins this parker. */
+            /* RESERVE THE DELIVERY SLOT FIRST, then claim the parker.
+             *
+             * Order matters and this is the order that cannot strand anything.
+             * The exception is stashed on the TARGET's sched -- which under M:N
+             * is a hub's, not ours -- and the target reads it at its resume
+             * point.  Claiming the parker first and finding the slot busy would
+             * leave a parker CAS'd to WOKEN with nobody delivering: the fiber
+             * then fails its own commit, takes the abort path and parks forever.
+             * That is exactly the ARMED bug fixed in 8af0d807, and it is much
+             * easier to reintroduce here.  Reserving first means a busy target
+             * costs us nothing -- we simply try the next parker.
+             *
+             * The RELEASE pairs with the ACQUIRE in runloom_netpoll_take_signal:
+             * the store must be visible to the hub thread before the wake below
+             * makes the fiber runnable. */
+            {   PyObject *slot = NULL;
+                if (!__atomic_compare_exchange_n(&tgt->signal_exc, &slot, exc, 0,
+                                                 __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+                    continue;            /* target already holds one; try the next */
+            }
             for (;;) {
                 cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
                 if (cur == RUNLOOM_PARK_WOKEN) break;
@@ -321,7 +346,11 @@ int runloom_netpoll_signal_wake(void)
              * restored the drain to 405bf98c, which took f0dc8edb out too.
              * Nothing about the ARMED claim was ever load-bearing.  Claiming AND
              * delivering satisfies either reading regardless. */
-            if (cur == RUNLOOM_PARK_WOKEN) continue;
+            if (cur == RUNLOOM_PARK_WOKEN) {
+                /* Another waker owns this parker: give the slot back, untouched. */
+                __atomic_store_n(&tgt->signal_exc, NULL, __ATOMIC_RELAXED);
+                continue;
+            }
             if (dbg)
                 fprintf(stderr, "[sigwake] WOKE fd=%d events=%d cur=%s | seen=%d parked=%d armed=%d woken=%d\n",
                         p->fd, p->events,
@@ -363,8 +392,11 @@ static void runloom_netpoll_take_signal(runloom_g_t *current_g,
                                         runloom_sched_t *s)
 {
     runloom_sched_t *owner = (current_g != NULL) ? current_g->owner : s;
-    PyObject *exc = (owner != NULL) ? owner->signal_exc : NULL;
-    if (owner != NULL) owner->signal_exc = NULL;
+    /* ACQUIRE pairs with the RELEASE in runloom_netpoll_signal_wake, which may
+     * have run on ANOTHER thread (the main thread delivering to a hub fiber). */
+    PyObject *exc = (owner != NULL)
+                    ? __atomic_load_n(&owner->signal_exc, __ATOMIC_ACQUIRE) : NULL;
+    if (owner != NULL) __atomic_store_n(&owner->signal_exc, NULL, __ATOMIC_RELAXED);
     if (exc != NULL) {
         PyObject *tb = PyException_GetTraceback(exc);   /* new ref or NULL */
         /* PyErr_Restore steals all three refs. */

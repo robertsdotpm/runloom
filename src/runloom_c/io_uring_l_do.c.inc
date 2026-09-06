@@ -57,8 +57,11 @@ static int runloom_iou_deliver_signal(runloom_g_t *g)
 {
     runloom_sched_t *owner = (g != NULL && g->owner != NULL)
                              ? g->owner : runloom_sched_get();
-    PyObject *exc = (owner != NULL) ? owner->signal_exc : NULL;
-    if (owner != NULL) owner->signal_exc = NULL;
+    /* ACQUIRE: signal_wake may have stashed this from the MAIN thread while this
+     * fiber runs on a hub.  Pairs with its RELEASE store. */
+    PyObject *exc = (owner != NULL)
+                    ? __atomic_load_n(&owner->signal_exc, __ATOMIC_ACQUIRE) : NULL;
+    if (owner != NULL) __atomic_store_n(&owner->signal_exc, NULL, __ATOMIC_RELAXED);
     if (exc != NULL) {
         PyObject *tb = PyException_GetTraceback(exc);   /* new ref or NULL */
         /* PyErr_Restore steals all three refs. */

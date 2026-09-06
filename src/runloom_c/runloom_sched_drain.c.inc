@@ -461,21 +461,29 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
                  * wait_fd).  signal_wake is called only here, after a handler
                  * actually raised -- never on a bare EINTR -- so a fiber is
                  * never woken spuriously. */
+                /* netpoll first, and it is the only one that can target a
+                 * fiber on ANOTHER scheduler (a hub's), so it takes the
+                 * exception directly rather than reading s->signal_exc.  The
+                 * other two serve this sched only and keep the pre-stash. */
+                if (sig_v != NULL && runloom_netpoll_signal_wake(sig_v)) {
+                    Py_XDECREF(sig_t); Py_XDECREF(sig_b);
+                    sig_t = sig_v = sig_b = NULL;
+                    continue;
+                }
                 if (s->signal_exc == NULL && sig_v != NULL) {
-                    s->signal_exc = sig_v;
+                    __atomic_store_n(&s->signal_exc, sig_v, __ATOMIC_RELEASE);
                     /* io_uring parkers are the second class of fiber whose only
                      * possible deliverer is this scheduler.  The has_sigwaiter()
                      * term in the gate above is what keeps this pair honest: we
                      * only ever consume a signal when one of these two can take
                      * it. */
-                    if (runloom_netpoll_signal_wake() ||
-                        runloom_iouring_signal_wake() ||
+                    if (runloom_iouring_signal_wake() ||
                         runloom_sched_signal_wake_sleeper(s)) {
                         Py_XDECREF(sig_t); Py_XDECREF(sig_b);
                         sig_t = sig_v = sig_b = NULL;
                         continue;   /* the woken parker raises it in its own stack */
                     }
-                    s->signal_exc = NULL;   /* no parker; carry it out of run() */
+                    __atomic_store_n(&s->signal_exc, NULL, __ATOMIC_RELAXED);   /* no parker; carry it out of run() */
                 }
                 sig_break = 1;
                 break;

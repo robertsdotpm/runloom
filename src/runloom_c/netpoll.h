@@ -120,7 +120,13 @@ int runloom_netpoll_drain_parked(void);
  * scheduler swallowing it or carrying it out of run().  Returns 1 if a parker
  * was woken, 0 if none were eligible (the scheduler then handles the signal
  * itself and carries a raised exception out of run_forever()). */
-int runloom_netpoll_signal_wake(void);
+/* Hand a raised signal-handler exception to ONE fiber parked in wait_fd and
+ * wake it; it raises in its own stack at its resume point.  Returns 1 and
+ * TAKES OWNERSHIP of exc on success, 0 if no parker was eligible (the caller
+ * keeps exc).  The target may belong to another scheduler: under M:N a hub
+ * fiber's parker is owned by its hub's sched, and the exception is stashed
+ * there for that hub's thread to pick up. */
+int runloom_netpoll_signal_wake(PyObject *exc);
 
 /* Force-unlink a g's pending parker, if any.  Called by the hub
  * completion path before runloom_g_decref so a leaked parker (M:N race

@@ -37,6 +37,12 @@ import sys
 
 import pytest
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from adv_util import needs_free_threading  # noqa: E402
+
+FT = needs_free_threading()
+needs_mn = pytest.mark.skipif(not FT, reason="M:N needs a GIL-disabled build")
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/src")
 try:
     import runloom_c as _rc
@@ -347,3 +353,101 @@ def test_sleep_heap_survives_removing_a_signalled_sleeper():
     assert "HEAP sel=SELECTOR woke=60/60 ordered=True" in p.stdout, (
         "sleep heap disturbed by the removal, or the selector missed its "
         "signal: %r\nstderr=%s" % (p.stdout.strip(), p.stderr[-1500:]))
+
+
+# ---------------------------------------------------------------------------
+# M:N.  Until this was wired up, a raised handler was ALWAYS carried out of
+# mn_run and no hub fiber was ever interrupted -- so an `except
+# KeyboardInterrupt:` or a `finally:` inside a hub fiber simply did not run.
+# The wake arm for hub parkers already existed in runloom_netpoll_signal_wake
+# (runloom_mn_wake_g); it was unreachable behind an owner filter keyed on the
+# calling scheduler, and a hub fiber's parker is owned by its own hub's sched.
+# ---------------------------------------------------------------------------
+_MN = r'''
+import faulthandler, os, signal, socket, sys
+sys.path.insert(0, "src")
+import runloom_c as rc
+
+HUBS = int(os.environ.get("MN_HUBS", "4"))
+box = {}
+def raiser(signum, frame):
+    raise KeyboardInterrupt("alarm")
+signal.signal(signal.SIGALRM, raiser)
+
+def worker():
+    L = rc.TCPConn.listen("127.0.0.1", 0)
+    s = socket.socket(fileno=os.dup(L.fileno()))
+    port = s.getsockname()[1]; s.detach()
+    c = rc.TCPConn.connect("127.0.0.1", port)
+    sc = L.accept()
+    try:
+        c.recv(64)                    # no peer data -> parks on this hub's netpoll
+        box["who"] = "returned"
+    except KeyboardInterrupt:
+        box["who"] = "fiber"          # <-- the contract
+    finally:
+        box["finally_ran"] = True
+    sc.close(); c.close(); L.close()
+
+faulthandler.dump_traceback_later(30, exit=True)
+rc.mn_init(HUBS)
+rc.mn_fiber(worker)
+signal.setitimer(signal.ITIMER_REAL, 0.3)
+try:
+    rc.mn_run()
+except KeyboardInterrupt:
+    box.setdefault("who", "out-of-mn_run")
+try:
+    rc.mn_fini()
+except Exception:
+    pass
+faulthandler.cancel_dump_traceback_later()
+sys.stdout.write("MN who=%s finally_ran=%s\n"
+                 % (box.get("who"), box.get("finally_ran", False)))
+'''
+
+
+@needs_sigalrm
+@needs_mn
+@pytest.mark.parametrize("hubs", ["2", "8"])
+def test_signal_reaches_a_hub_fiber(hubs):
+    """A fiber parked on a hub gets the interrupt in its own stack.
+
+    Measured before the fix, every run: who=out-of-mn_run, finally_ran=False --
+    the fiber stayed parked and its cleanup never ran.  After: who=fiber,
+    60/60 across 2, 8 and 16 hubs.
+    """
+    p = _run(_MN, timeout=120, env_extra={"MN_HUBS": hubs})
+    assert "MN who=fiber finally_ran=True" in p.stdout, (
+        "the interrupt did not reach the parked hub fiber: %r\n"
+        "stdout=%s\nstderr=%s"
+        % (p.stdout.strip(), p.stdout, p.stderr[-1500:]))
+
+
+@needs_sigalrm
+@needs_mn
+def test_mn_signal_parity_gap_is_still_open():
+    """select.poll in a HUB fiber still does NOT get its own signal.
+
+    This test asserts the LIMIT, not the capability, so the gap is recorded
+    rather than assumed closed.  Two paths remain on carry-out under M:N and
+    neither is a small extension:
+
+      * io_uring waiters -- `runloom_iou_sigwaiters` is RUNLOOM_TLS, so the
+        main thread cannot see a hub thread's list at all.
+      * select.poll sleepers -- runloom_sched_signal_wake_sleeper walks the
+        CALLER's sleep heap, and a hub's heap is mutated by its own thread
+        concurrently, so reaching it needs a lock that does not exist yet.
+
+    If you close either, this test should start failing.  That is the point:
+    flip it to the positive assertion then, and delete this docstring.
+    """
+    p = _run(_MN.replace(
+        'c.recv(64)                    # no peer data -> parks on this hub\'s netpoll',
+        'import selectors, runloom.monkey; runloom.monkey.patch()\n'
+        '        sel = selectors.PollSelector(); sel.register(sc.fileno(), selectors.EVENT_READ)\n'
+        '        sel.select(5); sel.close()'), timeout=120)
+    assert "MN who=out-of-mn_run" in p.stdout or "MN who=returned" in p.stdout, (
+        "select.poll under M:N now receives its own signal -- the parity gap "
+        "has been closed, so flip this test to assert the capability: %r"
+        % p.stdout.strip())
