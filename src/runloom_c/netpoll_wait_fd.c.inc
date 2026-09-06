@@ -248,6 +248,25 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
      * an fd_set, so reject those too (epoll/kqueue handle high fds fine). */
     if (fd < 0) { errno = EBADF; return -1; }
 
+    /* DEFERRED SIGNAL DELIVERY.  A signal raised while NO parker existed is
+     * stashed on the scheduler (runloom_sched_drain) rather than handed to
+     * whatever else happened to be runnable.  The first fiber to reach a
+     * cooperative park takes it here -- which is the fiber that was about to
+     * block, i.e. exactly the one a real recv()/send() would have been
+     * interrupted in.  Mirrors the RUNLOOM_NETPOLL_SIGNALED resume path below. */
+    {
+        runloom_sched_t *sw = runloom_sched_get();
+        if (sw != NULL && sw->signal_exc != NULL) {
+            PyObject *exc = sw->signal_exc;
+            PyObject *tb;
+            sw->signal_exc = NULL;
+            sw->signal_defer = 0;
+            tb = PyException_GetTraceback(exc);          /* new ref or NULL */
+            PyErr_Restore((PyObject *)Py_NewRef(Py_TYPE(exc)), exc, tb);
+            return -1;
+        }
+    }
+
     /* Native mn-sim gates (MN_SIM_DST_PLAN.md I2, gate [11]).  With the pump
      * no-op'd under the armed controlled scheduler, the census-dispatched sim
      * ledger is the ONLY wake source, so: (a) an fd outside the sim conn

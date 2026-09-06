@@ -1,3 +1,4 @@
+#define RUNLOOM_SIGNAL_DEFER_MAX 512
 /* Part of runloom_sched.c -- #included into that translation unit, not compiled
  * standalone.  See runloom_sched.c for the includes/typedefs/file-scope state
  * these definitions depend on. */
@@ -443,13 +444,36 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
                         sig_t = sig_v = sig_b = NULL;
                         continue;   /* the woken parker raises it in its own stack */
                     }
-                    s->signal_exc = NULL;   /* no parker; carry it out of run() */
+                    /* NO PARKER EXISTS YET -- defer, do not hand it away.
+                     *
+                     * Measured (RUNLOOM_DEBUG_SIGWAKE, macOS): in the failing
+                     * window the walk sees ZERO parkers -- the fiber that is
+                     * about to block has not linked one yet.  Handing the
+                     * exception to whatever else happened to be runnable killed
+                     * an unrelated sleeper and left the real blocker parked
+                     * forever.  Keep it stashed instead; wait_fd gives it to the
+                     * first fiber that reaches a cooperative park, which is the
+                     * fiber a real recv()/send() would have been interrupted in.
+                     *
+                     * BOUNDED: a workload that never parks on an fd (CoPoll
+                     * busy-polls select.poll on sched_sleep, no backing fd)
+                     * would otherwise hold the signal forever, so after
+                     * RUNLOOM_SIGNAL_DEFER_MAX scheduler iterations fall back to
+                     * the previous behaviour and let the next runnable fiber's
+                     * eval loop take it. */
+                    if (!runloom_sched_ready_empty(s) &&
+                        s->signal_defer < RUNLOOM_SIGNAL_DEFER_MAX) {
+                        s->signal_defer++;
+                        Py_XDECREF(sig_t); Py_XDECREF(sig_b);
+                        sig_t = sig_v = sig_b = NULL;   /* owned by signal_exc */
+                        continue;
+                    }
+                    s->signal_exc = NULL;
+                    s->signal_defer = 0;
                 }
                 if (!runloom_sched_ready_empty(s)) {
-                    /* No eligible parker, but a fiber is runnable.  Put the
-                     * exception back so THAT fiber's eval loop raises it, which
-                     * is exactly what the old ready_empty gate produced -- the
-                     * CoPoll path is unchanged. */
+                    /* Deferral exhausted (or already held): put it back so a
+                     * runnable fiber's eval loop raises it -- the CoPoll path. */
                     PyErr_Restore(sig_t, sig_v, sig_b);
                     sig_t = sig_v = sig_b = NULL;
                     continue;
