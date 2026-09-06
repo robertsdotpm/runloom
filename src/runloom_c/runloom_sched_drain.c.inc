@@ -443,6 +443,7 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
              * YOU CANNOT DELIVER is the invariant; ready_empty keeps the
              * no-parker case behaving exactly as it does today. */
             if ((__atomic_load_n(&s->netpoll_parked, __ATOMIC_ACQUIRE) > 0 ||
+                 runloom_iouring_has_sigwaiter() ||
                  runloom_sched_ready_empty(s)) && PyErr_CheckSignals() < 0) {
                 PyErr_Fetch(&sig_t, &sig_v, &sig_b);
                 PyErr_NormalizeException(&sig_t, &sig_v, &sig_b);
@@ -455,7 +456,13 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
                  * never woken spuriously. */
                 if (s->signal_exc == NULL && sig_v != NULL) {
                     s->signal_exc = sig_v;
-                    if (runloom_netpoll_signal_wake()) {
+                    /* io_uring parkers are the second class of fiber whose only
+                     * possible deliverer is this scheduler.  The has_sigwaiter()
+                     * term in the gate above is what keeps this pair honest: we
+                     * only ever consume a signal when one of these two can take
+                     * it. */
+                    if (runloom_netpoll_signal_wake() ||
+                        runloom_iouring_signal_wake()) {
                         Py_XDECREF(sig_t); Py_XDECREF(sig_b);
                         sig_t = sig_v = sig_b = NULL;
                         continue;   /* the woken parker raises it in its own stack */

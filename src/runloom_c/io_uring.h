@@ -51,6 +51,19 @@ void runloom_iouring_drain(void);
  * parked waiting for a CQE.  Includes ops in hub-spin-drain. */
 int runloom_iouring_inflight(void);
 
+/* In-fiber signal delivery for a fiber parked on an io_uring completion, the
+ * analogue of runloom_netpoll_signal_wake.  has_sigwaiter() reports whether
+ * signal_wake() would find a taker, so the drain can ask "can I deliver this?"
+ * BEFORE running PyErr_CheckSignals -- which consumes the pending signal and
+ * cannot be undone (see the gate in runloom_sched_drain.c.inc).
+ *
+ * signal_wake() had no declaration and no caller until this was added: its own
+ * comment claimed "the single-thread drain calls it after netpoll_signal_wake
+ * finds no parker", and `git log -S` says it never did.  A fiber blocked on a
+ * CQE could not receive a signal at all. */
+int runloom_iouring_signal_wake(void);
+int runloom_iouring_has_sigwaiter(void);
+
 /* Cancel a fiber parked on a single (global-ring) io_uring op: submit an
  * ASYNC_CANCEL so the kernel completes it -ECANCELED and the drain wakes the
  * fiber.  Returns 1 if a cancel was submitted, 0 otherwise (not parked on a

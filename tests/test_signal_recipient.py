@@ -37,6 +37,13 @@ import sys
 
 import pytest
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/src")
+try:
+    import runloom_c as _rc
+    _IOURING = bool(_rc.iouring_available())
+except Exception:                                    # pragma: no cover
+    _IOURING = False
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = sys.executable
 
@@ -129,3 +136,72 @@ def test_parked_fiber_outranks_a_due_sleeper():
     assert "Exception ignored in" not in p.stderr, (
         "the interrupt escaped a fiber entry point instead of being delivered "
         "to the parked call\n%s" % p.stderr[-1500:])
+
+
+# A fiber parked on an io_uring completion is the OTHER class of fiber whose
+# only possible deliverer is the scheduler -- it holds no netpoll parker at all.
+_IOU = r"""
+import faulthandler, os, signal, socket, sys
+sys.path.insert(0, "src")
+import runloom_c as rc
+box = {}
+def raiser(signum, frame):
+    raise KeyboardInterrupt("alarm")
+signal.signal(signal.SIGALRM, raiser)
+
+def client():
+    L = rc.TCPConn.listen("127.0.0.1", 0)
+    s = socket.socket(fileno=os.dup(L.fileno()))
+    port = s.getsockname()[1]; s.detach()
+    c = rc.TCPConn.connect("127.0.0.1", port)
+    sc = L.accept()
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 0.2)
+        c.recv(64)                     # no peer data -> parks on an io_uring CQE
+        box["who"] = "nobody"
+    except KeyboardInterrupt:
+        box["who"] = "parked"
+    except OSError as e:
+        box["who"] = "oserror:%s" % e.errno
+    sc.close(); c.close(); L.close()
+
+faulthandler.dump_traceback_later(20, exit=True)
+rc.fiber(client)
+try:
+    rc.run()
+except KeyboardInterrupt:
+    box.setdefault("who", "out-of-run")
+faulthandler.cancel_dump_traceback_later()
+sys.stdout.write("IOU who=%s\n" % box.get("who", "hung"))
+"""
+
+
+@needs_sigalrm
+@pytest.mark.skipif(not _IOURING, reason="io_uring not available")
+def test_signal_reaches_a_fiber_parked_on_io_uring():
+    """A fiber parked on a CQE gets the signal in its own stack.
+
+    Two independent defects made this impossible, and each hid the other:
+
+    1. `runloom_iouring_signal_wake()` had no declaration and no caller.  Its
+       own comment said "the single-thread drain calls it after
+       netpoll_signal_wake finds no parker"; `git log -S` says it never did.
+       Measured before the fix: `who=out-of-run` 3/3 -- the exception left
+       run() instead of the parked recv().
+    2. With it wired up, delivery then died in the CONSUMER: the io_uring
+       arms of TCPConn recv/recv_into/send/send_all called
+       `PyErr_SetFromErrno(PyExc_OSError)` on r < 0 without first checking for
+       a pending exception, so a delivered KeyboardInterrupt was overwritten:
+       `SystemError: <class 'OSError'> returned a result with an exception
+       set`.  The netpoll arms beside them already had the
+       `PyErr_Occurred() ? NULL : ...` guard; the io_uring arms never got it,
+       because defect 1 meant they were never once exercised.
+    """
+    p = _run(_IOU, env_extra={"RUNLOOM_TCPCONN_IOURING": "1"})
+    assert "SystemError" not in p.stderr, (
+        "a delivered signal was overwritten by OSError in the io_uring arm\n%s"
+        % p.stderr[-1500:])
+    assert "IOU who=parked" in p.stdout, (
+        "the signal did not come out of the parked io_uring recv; who=%r\n"
+        "stdout=%s\nstderr=%s"
+        % (p.stdout.strip(), p.stdout, p.stderr[-1500:]))

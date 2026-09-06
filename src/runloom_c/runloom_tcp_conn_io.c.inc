@@ -291,7 +291,7 @@ static PyObject *RunloomTCPConn_recv(RunloomTCPConn *self, PyObject *args)
             if (r < 0) {
                 RUNLOOM_TCPCONN_UNLOCK();
                 Py_DECREF(result);
-                return PyErr_SetFromErrno(PyExc_OSError);
+                return PyErr_Occurred() ? NULL : PyErr_SetFromErrno(PyExc_OSError);
             }
             if (r == 0 && self->closed) {
                 /* Our own close() cancelled this parked recv (ms_close): match
@@ -300,7 +300,7 @@ static PyObject *RunloomTCPConn_recv(RunloomTCPConn *self, PyObject *args)
                 RUNLOOM_TCPCONN_UNLOCK();
                 Py_DECREF(result);
                 errno = ECANCELED;
-                return PyErr_SetFromErrno(PyExc_OSError);
+                return PyErr_Occurred() ? NULL : PyErr_SetFromErrno(PyExc_OSError);
             }
             RUNLOOM_TCPCONN_UNLOCK();
             got = (Py_ssize_t)r;
@@ -323,7 +323,7 @@ static PyObject *RunloomTCPConn_recv(RunloomTCPConn *self, PyObject *args)
         RUNLOOM_TCPCONN_UNLOCK();
         if (r < 0) {
             Py_DECREF(result);
-            return PyErr_SetFromErrno(PyExc_OSError);
+            return PyErr_Occurred() ? NULL : PyErr_SetFromErrno(PyExc_OSError);
         }
         got = (Py_ssize_t)r;
         if (got < n_bytes) {
@@ -468,13 +468,13 @@ static PyObject *RunloomTCPConn_recv_into(RunloomTCPConn *self, PyObject *args)
             if (r < 0) {
                 RUNLOOM_TCPCONN_UNLOCK();
                 PyBuffer_Release(&buf);
-                return PyErr_SetFromErrno(PyExc_OSError);
+                return PyErr_Occurred() ? NULL : PyErr_SetFromErrno(PyExc_OSError);
             }
             if (r == 0 && self->closed) {
                 RUNLOOM_TCPCONN_UNLOCK();
                 PyBuffer_Release(&buf);
                 errno = ECANCELED;
-                return PyErr_SetFromErrno(PyExc_OSError);
+                return PyErr_Occurred() ? NULL : PyErr_SetFromErrno(PyExc_OSError);
             }
             RUNLOOM_TCPCONN_UNLOCK();
             PyBuffer_Release(&buf);
@@ -489,7 +489,7 @@ static PyObject *RunloomTCPConn_recv_into(RunloomTCPConn *self, PyObject *args)
         r = runloom_iouring_recv(fd, buf.buf, (size_t)n_bytes, flags);
         RUNLOOM_TCPCONN_UNLOCK();
         PyBuffer_Release(&buf);
-        if (r < 0) return PyErr_SetFromErrno(PyExc_OSError);
+        if (r < 0) return PyErr_Occurred() ? NULL : PyErr_SetFromErrno(PyExc_OSError);
         return PyLong_FromSsize_t((Py_ssize_t)r);
     }
 #endif

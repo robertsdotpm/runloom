@@ -121,6 +121,16 @@ void runloom_iouring_cancel_fd(int fd)
  * registered (the scheduler then carries the exception out of run(), as before).
  * The io_uring analogue of runloom_netpoll_signal_wake; the single-thread drain
  * calls it after netpoll_signal_wake finds no parker. */
+/* Exactly the test signal_wake's loop makes, without claiming anything: the
+ * drain must know whether a taker exists BEFORE it consumes the signal. */
+int runloom_iouring_has_sigwaiter(void)
+{
+    runloom_iou_sigwaiter_t *w;
+    for (w = runloom_iou_sigwaiters; w != NULL; w = w->next)
+        if (w->g != NULL && !w->signaled) return 1;
+    return 0;
+}
+
 int runloom_iouring_signal_wake(void)
 {
     runloom_iou_sigwaiter_t *w;

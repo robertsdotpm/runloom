@@ -22,7 +22,7 @@ static PyObject *RunloomTCPConn_send(RunloomTCPConn *self, PyObject *args)
         runloom_iouring_ssize_t r = runloom_iouring_send(fd, buf.buf,
                                                   (size_t)buf.len, flags);
         PyBuffer_Release(&buf);
-        if (r < 0) return PyErr_SetFromErrno(PyExc_OSError);
+        if (r < 0) return PyErr_Occurred() ? NULL : PyErr_SetFromErrno(PyExc_OSError);
         return PyLong_FromSsize_t((Py_ssize_t)r);
     }
 #endif
@@ -98,7 +98,7 @@ static PyObject *RunloomTCPConn_send_all(RunloomTCPConn *self, PyObject *args)
                                   (size_t)(buf.len - sent), flags);
             if (r < 0) {
                 PyBuffer_Release(&buf);
-                return PyErr_SetFromErrno(PyExc_OSError);
+                return PyErr_Occurred() ? NULL : PyErr_SetFromErrno(PyExc_OSError);
             }
             sent += (Py_ssize_t)r;
             if (r == 0) break;     /* defensive: avoid infinite loop */
