@@ -274,6 +274,17 @@ struct runloom_g {
      * else it busy-loops advancing logical time.  Only app sched_sleep / call_at
      * are logical.  Default 0 (logical); set 1 by runloom_sched_sleep_until_real. */
     int sleep_real;
+    /* This sleep is the INSIDE of a cooperative blocking call whose primitive
+     * has no pollable fd -- select.poll's wrapper (CoPoll) reprobing every
+     * 50ms, and the no-fd arm of select.select.  Such a fiber is in a blocking
+     * call exactly as much as one parked in wait_fd is, but it holds no parker,
+     * so runloom_netpoll_signal_wake can never find it and "parkers outrank
+     * sleepers" cannot reach it in principle.  Set per sleep by
+     * runloom_sched_sleep_until_io (never sticky), it makes that fiber a
+     * DELIVERABLE recipient for a raised signal -- the distinction the
+     * scheduler otherwise cannot draw between it and an application
+     * time.sleep(), which are byte-identical at this layer. */
+    int sleep_io;
     /* Race-safe park/wake counter.  runloom_sched_park_safe decrements;
      * if >0, the wake already arrived and we skip the yield.
      * runloom_sched_wake_safe increments and (if g is currently parked)
@@ -595,6 +606,14 @@ struct runloom_sched {
      * + cleared) by runloom_netpoll_wait_fd when it resumes on the
      * RUNLOOM_NETPOLL_SIGNALED sentinel.  Owned ref while set; NULL otherwise. */
     PyObject *signal_exc;
+    /* Entitlement for the sleep-side pickup: the ONE g that
+     * runloom_sched_signal_wake_sleeper handed signal_exc to.  wait_fd's
+     * recipient is identified by the RUNLOOM_NETPOLL_SIGNALED sentinel in its
+     * own ready_out; a sleeper has no such slot, so it is named here instead.
+     * Without it any sleep_io sleeper resuming for an unrelated reason could
+     * consume an exception committed to a different fiber, which would leave
+     * that fiber resuming on a sentinel with nothing to raise. */
+    runloom_g_t *signal_target;
     /* Count of THIS sched's fibers currently parked in netpoll (non-hub
      * parkers whose g->owner == this sched).  Bumped in runloom_parker_link /
      * unlink.  The drain loop uses this -- NOT the global parked count -- so a
@@ -719,6 +738,15 @@ void runloom_sched_sleep_until(runloom_sched_t *s, double wake_at);
 /* As above, but a WALL-clock deadline the logical clock won't advance for
  * (the aio keepalive heartbeat -- must not ride RUNLOOM_LOGICAL_CLOCK). */
 void runloom_sched_sleep_until_real(runloom_sched_t *s, double wake_at);
+/* Sleep as the reprobe of a cooperative blocking call (see g->sleep_io).
+ * Returns -1 with a Python error set if a raised signal was delivered to this
+ * fiber during the sleep, 0 otherwise. */
+int runloom_sched_sleep_until_io(runloom_sched_t *s, double wake_at);
+/* Is there a fiber of `s` sleeping inside a cooperative blocking call, and can
+ * one be handed a raised signal?  The gate in runloom_sched_drain asks the
+ * first before consuming a signal; the second performs the delivery. */
+int runloom_sched_has_sleep_io_waiter(runloom_sched_t *s);
+int runloom_sched_signal_wake_sleeper(runloom_sched_t *s);
 
 /* Park the current g on the quiescence-barrier list; the drain loop resumes
  * it once no other fiber is immediately runnable (ready empty), before

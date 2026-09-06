@@ -23,6 +23,34 @@ static PyObject *m_sched_sleep(PyObject *self, PyObject *arg)
     Py_RETURN_NONE;
 }
 
+/* runloom_c.sched_sleep_io(s) -> None.  Like sched_sleep, but marks the sleep as
+ * the REPROBE OF A COOPERATIVE BLOCKING CALL rather than an application sleep.
+ *
+ * select.poll has no kernel fd of its own, so runloom's wrapper drains with a
+ * non-blocking poll(0) and sleeps briefly between probes.  At the scheduler
+ * that is indistinguishable from time.sleep() -- same call, same fields -- so a
+ * raised signal handler could never be aimed at it, and an unrelated sleeper
+ * coming due would take the interrupt meant for the selector.  This entry point
+ * is the distinction, and it is a closed set: `grep sched_sleep_io` enumerates
+ * every sleep the scheduler will treat as interruptible-blocking.
+ *
+ * Raises the handler's exception here if one was delivered during the sleep. */
+static PyObject *m_sched_sleep_io(PyObject *self, PyObject *arg)
+{
+    double secs;
+    runloom_sched_t *s;
+    (void)self;
+    secs = PyFloat_AsDouble(arg);
+    if (secs == -1.0 && PyErr_Occurred()) return NULL;
+    s = runloom_sched_get();
+    {
+        double now = runloom_sched_logical_now_or(
+                         runloom_mn_logical_now_or(runloom_monotonic_seconds_compat()));
+        if (runloom_sched_sleep_until_io(s, now + secs) < 0) return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
 /* runloom_c.sched_sleep_real(s) -> None.  Like sched_sleep but a REAL wall-clock
  * sleep even under RUNLOOM_LOGICAL_CLOCK -- for the aio keepalive heartbeat, which
  * must poll in real time and must not advance the logical clock. */

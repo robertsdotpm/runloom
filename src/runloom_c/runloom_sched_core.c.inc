@@ -171,6 +171,7 @@ void runloom_sched_init(runloom_sched_t *s)
     s->completed = 0;
     s->stopping = 0;
     s->signal_exc = NULL;
+    s->signal_target = NULL;
     s->netpoll_parked = 0;
     runloom_mutex_init(&s->wake_list_lock);
     s->wake_list_head = NULL;

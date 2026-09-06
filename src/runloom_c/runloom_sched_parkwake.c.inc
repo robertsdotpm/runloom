@@ -835,47 +835,79 @@ void runloom_sched_park_safe(void)
  * runloom_sched_park_current). */
 /* real != 0: this sleeper uses the WALL clock even under the logical clock
  * (RUNLOOM_LOGICAL_CLOCK) -- see g->sleep_real.  Public wrappers below. */
-static void runloom_sched_sleep_until_ex(runloom_sched_t *s, double wake_at, int real)
+static int runloom_sched_sleep_until_ex(runloom_sched_t *s, double wake_at, int real, int io)
 {
     runloom_g_t *g;
     runloom_sched_t *target = runloom_mn_current_sched();
     if (target != NULL) {
         g = runloom_mn_tls_current_g();
-        if (g == NULL) return;
+        if (g == NULL) return 0;
         g->wake_at = wake_at;
         g->sleep_real = real;
-        if (runloom_sleep_push(target, g) < 0) return;
+        g->sleep_io = io;
+        if (runloom_sleep_push(target, g) < 0) { g->sleep_io = 0; return 0; }
         runloom_g_state_set(g, RUNLOOM_GST_PARKED_SLEEP);
         runloom_pystate_snap(&g->snap);
         runloom_mn_tls_mark_parked();
         runloom_coro_yield();
         runloom_g_state_set(g, RUNLOOM_GST_RUNNING);
-        return;
+        g->sleep_io = 0;
+        /* No pickup on the hub plane: mn_run's own sigpoll carries a raised
+         * handler out of mn_run and never populates signal_exc, so there is
+         * nothing here to claim.  Deliberate -- see mn_sched_init_fini.c.inc. */
+        return 0;
     }
     /* Single-thread path */
     g = s->current;
-    if (g == NULL) return;
+    if (g == NULL) return 0;
     g->wake_at = wake_at;
     g->sleep_real = real;
+    g->sleep_io = io;
     if (runloom_sleep_push(s, g) < 0) {
-        return; /* leave g in current; caller will see exception */
+        g->sleep_io = 0;
+        return 0; /* leave g in current; caller will see exception */
     }
     runloom_g_state_set(g, RUNLOOM_GST_PARKED_SLEEP);
     runloom_pystate_snap(&g->snap);
     runloom_coro_yield();
     runloom_g_state_set(g, RUNLOOM_GST_RUNNING);
+    g->sleep_io = 0;
+    /* The sleep-side pickup, mirroring wait_fd's RUNLOOM_NETPOLL_SIGNALED arm.
+     * Gated on signal_target so only the g the scheduler actually chose can
+     * consume the exception -- an unrelated sleep_io fiber resuming on its own
+     * deadline must not take it. */
+    if (s->signal_target == g) {
+        PyObject *exc = s->signal_exc;
+        s->signal_target = NULL;
+        s->signal_exc = NULL;
+        if (exc != NULL) {
+            PyObject *tb = PyException_GetTraceback(exc);   /* new ref or NULL */
+            /* PyErr_Restore steals all three refs. */
+            PyErr_Restore((PyObject *)Py_NewRef(Py_TYPE(exc)), exc, tb);
+            return -1;
+        }
+    }
+    return 0;
 }
 
 void runloom_sched_sleep_until(runloom_sched_t *s, double wake_at)
 {
-    runloom_sched_sleep_until_ex(s, wake_at, 0);
+    (void)runloom_sched_sleep_until_ex(s, wake_at, 0, 0);
+}
+
+/* The reprobe of a cooperative blocking call with no pollable fd (CoPoll, and
+ * select.select's no-fd arm).  Marks the sleep so the scheduler can tell it
+ * from an application time.sleep() and deliver a raised signal here. */
+int runloom_sched_sleep_until_io(runloom_sched_t *s, double wake_at)
+{
+    return runloom_sched_sleep_until_ex(s, wake_at, 0, 1);
 }
 
 /* Sleep until a WALL-clock deadline that the logical clock won't advance for
  * (the aio keepalive heartbeat). */
 void runloom_sched_sleep_until_real(runloom_sched_t *s, double wake_at)
 {
-    runloom_sched_sleep_until_ex(s, wake_at, 1);
+    (void)runloom_sched_sleep_until_ex(s, wake_at, 1, 0);
 }
 
 /* ---- run_ready: quiescence-barrier yield ----

@@ -205,3 +205,145 @@ def test_signal_reaches_a_fiber_parked_on_io_uring():
         "the signal did not come out of the parked io_uring recv; who=%r\n"
         "stdout=%s\nstderr=%s"
         % (p.stdout.strip(), p.stdout, p.stderr[-1500:]))
+
+
+# select.poll has no kernel fd, so its wrapper reprobes on a short sleep.  That
+# makes it the one cooperative blocking call the scheduler cannot see: it holds
+# no parker, so "a parker outranks a sleeper" can never reach it, and its sleep
+# is byte-identical to an application time.sleep().  sched_sleep_io is the tag
+# that distinguishes them.
+_COPOLL = r'''
+import faulthandler, signal, socket, sys, time
+sys.path.insert(0, "src")
+import runloom_c as rc
+import runloom.monkey
+runloom.monkey.patch()
+import selectors
+
+box = {}
+class InterruptSelect(Exception):
+    pass
+def handler(*a):
+    raise InterruptSelect
+signal.signal(signal.SIGALRM, handler)
+
+def selector_fiber():
+    rd, wr = socket.socketpair()
+    s = selectors.PollSelector()
+    s.register(rd, selectors.EVENT_READ)
+    t0 = time.monotonic()
+    try:
+        s.select(10)
+        box["who"] = "nobody"
+    except InterruptSelect:
+        box["who"] = "SELECTOR"
+    box["elapsed"] = time.monotonic() - t0
+    box["done"] = True
+    s.close(); rd.close(); wr.close()
+
+def observer():
+    try:
+        while "done" not in box:
+            rc.sched_sleep(0.0005)      # dense, unrelated application sleep
+    except InterruptSelect:
+        box["who"] = "observer"
+        box["done"] = True
+
+faulthandler.dump_traceback_later(30, exit=True)
+signal.setitimer(signal.ITIMER_REAL, 0.3)
+rc.fiber(selector_fiber); rc.fiber(observer)
+try:
+    rc.run()
+except InterruptSelect:
+    box.setdefault("who", "out-of-run")
+faulthandler.cancel_dump_traceback_later()
+sys.stdout.write("COPOLL who=%s elapsed=%.2f\n"
+                 % (box.get("who", "hung"), box.get("elapsed", -1)))
+'''
+
+
+@needs_sigalrm
+def test_selector_outranks_a_dense_unrelated_sleeper():
+    """A select.poll wrapper beats an application sleep to its own signal.
+
+    This is the case a parker-based rule cannot reach: CoPoll registers no
+    netpoll parker at all (measured: the signal walk reports seen=0), so it is
+    only ever a sleeper.  Before sched_sleep_io the dense observer took the
+    interrupt and the selector ran its FULL timeout -- measured 10.00s, 5/5,
+    which is exactly the shape of the CPython test_select_interrupt_exc failure
+    that got two earlier fix attempts reverted.  After: 0.30s, 5/5, raised in
+    the selector's own frame at the itimer deadline.
+    """
+    p = _run(_COPOLL, timeout=120)
+    assert "COPOLL who=SELECTOR" in p.stdout, (
+        "the interrupt did not land in the selector's frame: %r\n"
+        "stdout=%s\nstderr=%s"
+        % (p.stdout.strip(), p.stdout, p.stderr[-1500:]))
+    # The timeout is 10s and the alarm is at 0.3s: a pass that took the full
+    # timeout would mean the signal arrived by some other route.
+    import re
+    m = re.search(r"elapsed=([0-9.]+)", p.stdout)
+    assert m and float(m.group(1)) < 2.0, (
+        "the selector returned but not promptly (%s) -- the signal did not "
+        "interrupt the select" % p.stdout.strip())
+
+
+# Delivering to a sleeper means pulling it out of the MIDDLE of the sleep heap,
+# which is the one new data-structure operation in this area
+# (runloom_sleep_remove: linear find, fill from the tail, restore the invariant
+# in both directions).  Every other heap op only ever touches the root, so
+# nothing else would exercise a hole fill.
+_HEAP = r"""
+import faulthandler, signal, socket, sys
+sys.path.insert(0, "src")
+import runloom_c as rc
+import runloom.monkey
+runloom.monkey.patch()
+import selectors
+
+N = 60
+box = {"woke": []}
+class InterruptSelect(Exception):
+    pass
+def handler(*a):
+    raise InterruptSelect
+signal.signal(signal.SIGALRM, handler)
+
+def sleeper(i):
+    rc.sched_sleep(0.05 + i * 0.002)      # staggered: real heap structure
+    box["woke"].append(i)
+
+def selector_fiber():
+    rd, wr = socket.socketpair()
+    s = selectors.PollSelector()
+    s.register(rd, selectors.EVENT_READ)
+    try:
+        s.select(10)
+        box["sel"] = "nobody"
+    except InterruptSelect:
+        box["sel"] = "SELECTOR"
+    s.close(); rd.close(); wr.close()
+
+faulthandler.dump_traceback_later(40, exit=True)
+for i in range(N):
+    rc.fiber(lambda i=i: sleeper(i))
+rc.fiber(selector_fiber)
+signal.setitimer(signal.ITIMER_REAL, 0.1)   # fires while most sleepers are queued
+try:
+    rc.run()
+except InterruptSelect:
+    box.setdefault("sel", "out-of-run")
+faulthandler.cancel_dump_traceback_later()
+woke = box["woke"]
+sys.stdout.write("HEAP sel=%s woke=%d/%d ordered=%s\n"
+                 % (box.get("sel"), len(woke), N, woke == sorted(woke)))
+"""
+
+
+@needs_sigalrm
+def test_sleep_heap_survives_removing_a_signalled_sleeper():
+    """Yanking one sleeper out of the middle must not disturb the others."""
+    p = _run(_HEAP, timeout=120)
+    assert "HEAP sel=SELECTOR woke=60/60 ordered=True" in p.stdout, (
+        "sleep heap disturbed by the removal, or the selector missed its "
+        "signal: %r\nstderr=%s" % (p.stdout.strip(), p.stderr[-1500:]))

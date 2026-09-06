@@ -126,6 +126,12 @@ static PyMethodDef module_methods[] = {
     {"sched_sleep_real", m_sched_sleep_real, METH_O,
      "Like sched_sleep but a REAL wall-clock sleep even under "
      "RUNLOOM_LOGICAL_CLOCK (for the aio keepalive heartbeat)."},
+    {"sched_sleep_io", m_sched_sleep_io, METH_O,
+     "sched_sleep_io(seconds) -- sleep as the reprobe of a cooperative blocking\n"
+     "call that has no pollable fd (select.poll's wrapper).  Unlike sched_sleep,\n"
+     "the scheduler may deliver a raised signal handler's exception HERE, so the\n"
+     "interrupt propagates out of the blocking call instead of landing on\n"
+     "whichever unrelated fiber happens to run next."},
     {"loop_clock",  m_loop_clock,  METH_NOARGS,
      "loop_clock() -> float: the aio event-loop clock -- the logical clock when "
      "RUNLOOM_LOGICAL_CLOCK is set (deterministic call_at/sleep replay), else "

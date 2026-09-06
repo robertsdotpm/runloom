@@ -243,9 +243,9 @@ def _patched_select(rlist, wlist, xlist, timeout=None):
             # Degenerate "block forever waiting for nothing": park in long
             # cooperative increments (cancellable) rather than busy-wait.
             while True:
-                _co_sleep(3600.0)
+                _co_sleep_io(3600.0)
         if timeout > 0:
-            _co_sleep(timeout)
+            _co_sleep_io(timeout)
         return [], [], []
 
     # Cooperative path: register the fds on a transient epoll/kqueue and park
@@ -380,12 +380,12 @@ class CoPoll(object):
             if ev:
                 return ev
             if deadline is None:
-                _co_sleep(_SELECTOR_REPROBE_S)
+                _co_sleep_io(_SELECTOR_REPROBE_S)
             else:
                 rem = deadline - time.monotonic()
                 if rem <= 0:
                     return []
-                _co_sleep(min(_SELECTOR_REPROBE_S, rem))
+                _co_sleep_io(min(_SELECTOR_REPROBE_S, rem))
 
     def __getattr__(self, name):
         return getattr(self._r, name)

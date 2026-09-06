@@ -1082,6 +1082,29 @@ def _co_sleep(seconds):
         runloom.sleep(seconds)
 
 
+def _co_sleep_io(seconds):
+    """_co_sleep for the REPROBE of a cooperative blocking call, not an app sleep.
+
+    select.poll has no kernel fd to park on, so its wrapper drains with a
+    non-blocking poll(0) and sleeps briefly between probes.  To the scheduler
+    that looks exactly like time.sleep(), so a raised signal handler could not
+    be aimed at it and an unrelated sleeper coming due would take the interrupt
+    meant for the selector -- CPython's test_select_interrupt_exc contract.
+    sched_sleep_io marks the sleep so the scheduler can tell the two apart and
+    deliver here, raising in this fiber's own stack.
+
+    Falls back to a plain cooperative sleep when the extension predates the
+    builtin, so a stale in-place build degrades to the old behaviour rather
+    than failing to import.
+    """
+    if getattr(_g_state, "count", 0) > 0:
+        sleep_io = getattr(runloom_c, "sched_sleep_io", None)
+        if sleep_io is not None:
+            sleep_io(seconds)
+            return
+    _co_sleep(seconds)
+
+
 # Re-export every name defined above (stdlib aliases, constants, helpers, the
 # Parker and the backend) so a section module gets the whole foundation with a
 # single `from ._base import *`.  Underscore names are included on purpose.

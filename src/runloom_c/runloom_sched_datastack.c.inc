@@ -480,6 +480,82 @@ static int runloom_sleep_push(runloom_sched_t *s, runloom_g_t *g)
     return 0;
 }
 
+/* Remove an ARBITRARY g from the sleep heap: linear find, fill the hole with
+ * the tail, then restore the invariant (up first, then down -- the tail can
+ * belong on either side of the hole).  The other heap ops only ever touch the
+ * root, so this is the one caller that needs it.
+ *
+ * The linear scan is deliberate: it runs once per RAISED SIGNAL, on the idle
+ * path, which is many orders of magnitude rarer than a push or a pop.  Keeping
+ * an index on the g to make it O(1) would put a field write on every sleep.
+ * Returns 1 if g was found and removed, 0 if it was not in the heap. */
+static int runloom_sleep_remove(runloom_sched_t *s, runloom_g_t *g)
+{
+    Py_ssize_t i, last_i, child;
+    for (i = 1; i <= s->sleep_size; i++)
+        if (s->sleep_heap[i] == g) break;
+    if (i > s->sleep_size) return 0;
+    last_i = s->sleep_size;
+    __atomic_store_n(&s->sleep_size, s->sleep_size - 1, __ATOMIC_RELAXED);
+    if (i == last_i) return 1;                    /* removed the tail itself */
+    s->sleep_heap[i] = s->sleep_heap[last_i];
+    while (i > 1 && runloom_sleep_before(s->sleep_heap[i], s->sleep_heap[i / 2])) {
+        runloom_g_t *t = s->sleep_heap[i];
+        s->sleep_heap[i] = s->sleep_heap[i / 2];
+        s->sleep_heap[i / 2] = t;
+        i /= 2;
+    }
+    for (;;) {
+        child = i * 2;
+        if (child > s->sleep_size) break;
+        if (child + 1 <= s->sleep_size &&
+            runloom_sleep_before(s->sleep_heap[child + 1], s->sleep_heap[child]))
+            child++;
+        if (!runloom_sleep_before(s->sleep_heap[child], s->sleep_heap[i])) break;
+        {   runloom_g_t *t = s->sleep_heap[i];
+            s->sleep_heap[i] = s->sleep_heap[child];
+            s->sleep_heap[child] = t; }
+        i = child;
+    }
+    return 1;
+}
+
+/* Is any fiber of `s` sleeping inside a cooperative blocking call? */
+int runloom_sched_has_sleep_io_waiter(runloom_sched_t *s)
+{
+    Py_ssize_t i;
+    if (s == NULL) return 0;
+    for (i = 1; i <= s->sleep_size; i++) {
+        runloom_g_t *g = s->sleep_heap[i];
+        if (g != NULL && g->sleep_io && g->owner == s) return 1;
+    }
+    return 0;
+}
+
+/* Hand the stashed signal to one such fiber: name it in s->signal_target, take
+ * it out of the sleep heap and make it runnable NOW.  It picks the exception up
+ * at its resume point in runloom_sched_sleep_until_ex, in its OWN stack -- the
+ * sleeper analogue of wait_fd's RUNLOOM_NETPOLL_SIGNALED sentinel.
+ *
+ * Waking it immediately rather than letting the deadline arrive is what keeps
+ * the "never fetch a signal you cannot deliver" invariant true: the exception
+ * is never held across an unbounded window, so it needs no expiry bound and
+ * cannot be stranded (the two failure modes of the reverted dd8d0008). */
+int runloom_sched_signal_wake_sleeper(runloom_sched_t *s)
+{
+    Py_ssize_t i;
+    if (s == NULL) return 0;
+    for (i = 1; i <= s->sleep_size; i++) {
+        runloom_g_t *g = s->sleep_heap[i];
+        if (g == NULL || !g->sleep_io || g->owner != s) continue;
+        if (!runloom_sleep_remove(s, g)) return 0;
+        s->signal_target = g;
+        runloom_ready_push(s, g);
+        return 1;
+    }
+    return 0;
+}
+
 runloom_g_t *runloom_sched_sleep_peek(runloom_sched_t *s)
 {
     if (s->sleep_size == 0) return NULL;

@@ -444,6 +444,7 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
              * no-parker case behaving exactly as it does today. */
             if ((__atomic_load_n(&s->netpoll_parked, __ATOMIC_ACQUIRE) > 0 ||
                  runloom_iouring_has_sigwaiter() ||
+                 runloom_sched_has_sleep_io_waiter(s) ||
                  runloom_sched_ready_empty(s)) && PyErr_CheckSignals() < 0) {
                 PyErr_Fetch(&sig_t, &sig_v, &sig_b);
                 PyErr_NormalizeException(&sig_t, &sig_v, &sig_b);
@@ -462,7 +463,8 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
                      * only ever consume a signal when one of these two can take
                      * it. */
                     if (runloom_netpoll_signal_wake() ||
-                        runloom_iouring_signal_wake()) {
+                        runloom_iouring_signal_wake() ||
+                        runloom_sched_signal_wake_sleeper(s)) {
                         Py_XDECREF(sig_t); Py_XDECREF(sig_b);
                         sig_t = sig_v = sig_b = NULL;
                         continue;   /* the woken parker raises it in its own stack */
@@ -691,6 +693,7 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
     if (s->signal_exc != NULL) {
         Py_CLEAR(s->signal_exc);
     }
+    s->signal_target = NULL;
     return s->completed - completed_before;
 }
 
