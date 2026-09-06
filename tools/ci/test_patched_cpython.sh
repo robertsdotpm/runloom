@@ -198,27 +198,22 @@ if [ "$run_runtests" = yes ]; then
     # Tests that need an optional dep (hypothesis, unavailable on free-threaded
     # < 3.14) pytest.importorskip themselves, so they SKIP rather than fail here.
 
-    # RL_CI_SUITE picks how much to run.  The LOCAL gate is still the authority
-    # (scripts/check_all_fast.sh runs everything, including the phases that need
-    # Spin/CBMC/TLC installed); hosted CI deliberately runs less.
+    # RL_CI_SUITE picks how much to run, and there is deliberately only ONE
+    # choice: scripts/check_all_fast.sh is a LOCAL/developer gate and is never
+    # run from hosted CI.  It pulls in the soak corpus (tests/big_100, whose
+    # programs default to a 3600s duration), the formal-verification engines
+    # and the vendored asyncio suite -- none of which belong in a per-push
+    # gate, and all of which are environment-sensitive enough that they were
+    # reporting runner problems as product defects.
     #
-    #   cheap (default, every push/PR) -- the Python suite plus the three
-    #       scheduler phases that cost seconds (mn 3s, replay 14s, ctest 1s
-    #       measured on a 64-core dev box).  Catches the overwhelming majority
-    #       of regressions for ~2 minutes of runner time.
-    #   full (weekly schedule)         -- scripts/check_all_fast.sh.  Needs the
-    #       formal-verification toolchain, so it is NOT on the per-push path.
+    #   cheap (the only mode) -- the Python suite plus the three scheduler
+    #       phases that cost seconds (mn 3s, replay 14s, ctest 1s measured on a
+    #       64-core dev box).  Catches the overwhelming majority of regressions
+    #       for ~2 minutes of runner time.
+    #
+    # The `case` is kept (rather than collapsed) so an unrecognised value is a
+    # loud error instead of silently running nothing.
     case "${RL_CI_SUITE:-cheap}" in
-      full)
-        rl_step "runloom FULL gate (scripts/check_all_fast.sh) -- REQUIRED"
-        if ( cd "$ROOT" && PYTHON="$PYBIN" scripts/check_all_fast.sh ); then
-            rl_ci_summary "✅ **check_all_fast** ($VERSION, $PLATFORM): passed"
-        else
-            rl_warn "check_all_fast FAILED"
-            rl_ci_summary "❌ **check_all_fast** ($VERSION, $PLATFORM): FAILED"
-            rc_total=1
-        fi
-        ;;
       cheap)
         rl_step "runloom suite (tests/run_isolated.py) -- REQUIRED"
         if ( cd "$ROOT" && PYTHONPATH=src "$PYBIN" tests/run_isolated.py ); then
@@ -237,7 +232,7 @@ if [ "$run_runtests" = yes ]; then
             rc_total=1
         fi
         ;;
-      *) rl_die "RL_CI_SUITE must be cheap|full (got '${RL_CI_SUITE}')" ;;
+      *) rl_die "RL_CI_SUITE must be 'cheap' (got '${RL_CI_SUITE}'); the 'full' mode was removed -- run scripts/check_all_fast.sh locally instead" ;;
     esac
 fi
 

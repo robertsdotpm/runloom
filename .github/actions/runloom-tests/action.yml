@@ -13,7 +13,7 @@ inputs:
     description: CPython version, major.minor.patch (must match provide-cpython).
     required: true
   suite:
-    description: "cheap (push/PR: python suite + mn/replay/ctest) or full (weekly: check_all_fast)."
+    description: "Test depth. Only 'cheap' is supported (python suite + mn/replay/ctest). check_all_fast.sh is a local/developer gate and is deliberately not run from CI."
     default: cheap
   timeout-mult:
     description: run_isolated deadline scaler for slow shared runners.

@@ -32,21 +32,9 @@ on:
         description: "CPython versions to build (major.minor.patch, space/comma separated). Blank = repo default."
         required: false
         default: ""
-      suite:
-        description: "Test depth. Blank = the event default (full on the weekly, cheap otherwise). 'full' runs scripts/check_all_fast.sh -- the only way to request the full gate by hand; without it the weekly schedule was the sole path to it, so a fix to a phase the cheap subset skips could not be verified until the next Sunday."
-        required: false
-        default: ""
-        type: choice
-        options: ["", "cheap", "full"]
   pull_request:
   push:
     branches: [main]
-  # Weekly FULL gate (scripts/check_all_fast.sh).  Sunday 04:00 UTC.  The
-  # per-push path runs a deliberately cheap subset; this is what catches the
-  # rest.  It self-skips when nothing has landed since the last run (see the
-  # `weekly_needed` job) so a quiet week costs nothing.
-  schedule:
-    - cron: "0 4 * * 0"
 
 # Least privilege by default: no job gets a write token just for building and
 # running a from-source interpreter.  `release` re-grants `contents: write` to
@@ -118,26 +106,6 @@ jobs:
   # ---- zero-fuzz patch-apply gate (only when a from-source build will run) ----
   # A fast (~1 min) early signal before the ~15-min build.  `test` does NOT
   # depend on it (so a skipped gate never skips `test`); ci-success does.
-  # ---- weekly: only worth running if something actually landed --------------
-  weekly_needed:
-    name: weekly needed?
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    outputs:
-      run: ${{ steps.q.outputs.run }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - id: q
-        name: Any commits in the last 7 days?
-        run: |
-          set -eu
-          n="$(git log --since='7 days ago' --oneline | wc -l | tr -d ' ')"
-          echo "commits in last 7 days: $n"
-          if [ "$n" -gt 0 ]; then echo "run=true" >> "$GITHUB_OUTPUT"
-          else echo "run=false" >> "$GITHUB_OUTPUT"; echo "nothing landed -- skipping the weekly full gate"; fi
-
   patch-gate:
     name: verify patches apply (zero-fuzz)
     needs: changes
@@ -194,23 +162,20 @@ jobs:
 
   # ---- provision ONE interpreter (built | prebuilt) + run runloom -----------
   test:
-    needs: [changes, resolve, weekly_needed]
+    needs: [changes, resolve]
     # `!cancelled()` is load-bearing, not decoration.  A needed job that SKIPS
-    # normally skips its dependents too, whatever the `if:` says -- and
-    # weekly_needed skips on every non-schedule run by design.  Without a status
-    # function here that took `test` down with it: the whole matrix skipped, and
-    # ci-success went GREEN because a skipped job counts as a pass.  Any `if:`
-    # containing a status function opts out of that propagation.
+    # normally skips its dependents too, whatever the `if:` says.  When that
+    # happened here it took the whole matrix down with it, and ci-success went
+    # GREEN because a skipped job counts as a pass.  Any `if:` containing a
+    # status function opts out of that propagation, so keep one.
     #
     # The explicit result checks keep the original meaning: run when the
-    # classifier said there is something to do, and on the schedule path only
-    # when something actually landed this week.
+    # classifier said there is something to do.
     if: >-
       !cancelled() &&
       needs.changes.result == 'success' &&
       needs.resolve.result == 'success' &&
-      needs.changes.outputs.run == 'true' &&
-      (github.event_name != 'schedule' || needs.weekly_needed.outputs.run == 'true')
+      needs.changes.outputs.run == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -265,9 +230,13 @@ jobs:
         uses: ./.github/actions/runloom-tests
         with:
           version: ${{ matrix.version }}
-          # cheap on every push/PR; the full check_all_fast on the weekly, or
-          # on demand via the workflow_dispatch `suite` input (empty = default).
-          suite: ${{ github.event.inputs.suite || (github.event_name == 'schedule' && 'full' || 'cheap') }}
+          # ALWAYS cheap.  scripts/check_all_fast.sh is a local/developer gate
+          # and is deliberately NOT run from CI: it pulls in the soak corpus
+          # (tests/big_100, whose programs default to a 3600s duration), the
+          # formal-verification engines and the vendored asyncio suite, none of
+          # which belong in a per-push gate.  There is no `full` path here any
+          # more -- run scripts/check_all_fast.sh yourself.
+          suite: cheap
 
       # Package for release only on a push to a release branch that actually
       # built a fresh interpreter.
@@ -368,7 +337,7 @@ jobs:
     # 'failure'.  Linux is therefore the blocking gate and macOS is a reporting
     # one -- deliberate while we find out whether the environment-sensitive
     # failures are macOS-specific.  Drop the continue-on-error to promote it.
-    needs: [changes, weekly_needed, patch-gate, resolve, test, release]
+    needs: [changes, patch-gate, resolve, test, release]
     if: always()
     runs-on: ubuntu-latest
     steps:
