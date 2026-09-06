@@ -238,6 +238,7 @@ static int runloom_iouring_ring_submit_sqe(runloom_iouring_ring_t *r,
  * after this file); forward-declared so ring_drain can delegate a loop-armed
  * ring's drain to the sentinel-aware single-reaper. */
 static void runloom_iouring_loop_drain(runloom_iouring_ring_t *r, int *flags_out);
+void runloom_iouring_submit_cancel_for_op(void *opv);   /* defined below */
 
 void runloom_iouring_ring_drain(runloom_iouring_ring_t *r)
 {
@@ -398,10 +399,56 @@ static runloom_iouring_ssize_t runloom_iouring_ring_do(runloom_iouring_ring_t *r
             /* Publish for runloom_iouring_cancel_g (see io_uring_l_do.c.inc). */
             if (op.g != NULL)
                 __atomic_store_n(&op.g->iouring_op, &op, __ATOMIC_RELEASE);
-            runloom_sched_park_current();
-            runloom_coro_yield();
-            if (op.g != NULL)
-                __atomic_store_n(&op.g->iouring_op, NULL, __ATOMIC_RELEASE);
+            /* In-fiber signal delivery, with the cancel-and-RE-PARK discipline
+             * the single-shot op requires (the same shape as the global-ring
+             * branch in runloom_iouring_do).  THIS is the single-shot path a
+             * hub actually takes: a hub owns a ring whenever any io_uring
+             * feature is enabled, and runloom_iouring_recv/send route here
+             * before ever reaching the global ring.
+             *
+             * We must not return on the signal while the SQE is in flight --
+             * the CQE writes through `op`, which is on this stack.  So cancel
+             * and keep parking; the loop exits only once op.result is set, by
+             * the real completion or by the cancel's -ECANCELED.
+             *
+             * Re-parking is sound: op.wait is a one-way latch only a completing
+             * drainer moves (PARKED -> DONE, in ring_drain above), and it
+             * stores op.result BEFORE that exchange.  A signal wake leaves
+             * op.wait == PARKED, so the drainer's `prev == PARKED` test still
+             * fires our wake; there is no INFLIGHT->PARKED CAS to redo.
+             *
+             * SINGLE_ISSUER holds for the cancel: hub rings may only be
+             * submitted to by their owning hub thread, and this fiber IS
+             * running on that thread -- the same reason
+             * runloom_iouring_submit_cancel_for_op is safe when the hub drains
+             * its cancel mailbox.  (A CROSS-thread canceller cannot do this and
+             * must go through the mailbox; see runloom_iouring_cancel_g.) */
+            {
+                runloom_iou_sigwaiter_t sw;
+                int cancelled = 0;
+                runloom_iou_sigwaiter_link(&sw, op.g, hub);
+                do {
+                    runloom_sched_park_current();
+                    runloom_coro_yield();
+                    if (sw.signaled && !cancelled) {
+                        cancelled = 1;
+                        runloom_iouring_submit_cancel_for_op(&op);
+                    }
+                } while (__atomic_load_n(&op.result, __ATOMIC_ACQUIRE)
+                         == INT32_MIN);
+                runloom_iou_sigwaiter_unlink(&sw);
+                if (op.g != NULL)
+                    __atomic_store_n(&op.g->iouring_op, NULL, __ATOMIC_RELEASE);
+                if (sw.signaled &&
+                    __atomic_load_n(&op.result, __ATOMIC_ACQUIRE) < 0) {
+                    /* Cancelled/errored: deliver in-fiber.  (Raced to success ->
+                     * fall through and return the data; the hub drops the
+                     * undelivered exception at teardown.) */
+                    (void)runloom_iou_deliver_signal(op.g);
+                    errno = EINTR;
+                    return -1;
+                }
+            }
         }
     }
 

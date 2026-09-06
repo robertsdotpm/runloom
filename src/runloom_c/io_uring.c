@@ -262,7 +262,7 @@ int runloom_iouring_available(void) { return 0; }
 int runloom_iouring_eventfd(void)   { return -1; }
 void runloom_iouring_drain(void)    { /* no-op */ }
 int runloom_iouring_inflight(void)  { return 0; }
-int runloom_iouring_signal_wake(void)    { return 0; }
+int runloom_iouring_signal_wake(struct _object *exc) { (void)exc; return 0; }
 int runloom_iouring_has_sigwaiter(void)  { return 0; }
 int runloom_iouring_cancel_g(struct runloom_g *g) { (void)g; return 0; }
 void runloom_iouring_submit_cancel_for_op(void *op) { (void)op; }

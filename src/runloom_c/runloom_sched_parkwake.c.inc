@@ -851,21 +851,62 @@ static int runloom_sched_sleep_until_ex(runloom_sched_t *s, double wake_at, int 
     runloom_g_t *g;
     runloom_sched_t *target = runloom_mn_current_sched();
     if (target != NULL) {
+        void *hub = runloom_mn_current_hub_opaque();
         g = runloom_mn_tls_current_g();
         if (g == NULL) return 0;
         g->wake_at = wake_at;
         g->sleep_real = real;
         g->sleep_io = io;
+        /* Reset the enqueue claim BEFORE the heap push and the waiter link, so
+         * the timer pop and a signal wake both race a fresh 0 for THIS sleep.
+         * Own thread, and no other party can see the claim until one of those
+         * two publishes us. */
+        __atomic_store_n(&g->sleep_claimed, 0, __ATOMIC_RELAXED);
         if (runloom_sleep_push(target, g) < 0) { g->sleep_io = 0; return 0; }
         runloom_g_state_set(g, RUNLOOM_GST_PARKED_SLEEP);
         runloom_pystate_snap(&g->snap);
         runloom_mn_tls_mark_parked();
+        if (io) {
+            /* A cooperative-blocking reprobe is a DELIVERABLE recipient for a
+             * raised signal handler, but only the main thread runs handlers and
+             * this fiber sits in its HUB's sleep heap, which the main thread
+             * must not touch.  Register instead; runloom_sched_sleep_signal_wake
+             * marks the node from over there.  Plain sleeps (io == 0) are not
+             * recipients and skip the lock entirely. */
+            runloom_sleep_sigwaiter_t sw;
+            runloom_sleep_sigwaiter_link(&sw, g, hub, target);
+            runloom_coro_yield();
+            runloom_sleep_sigwaiter_unlink(&sw);
+            runloom_g_state_set(g, RUNLOOM_GST_RUNNING);
+            g->sleep_io = 0;
+            if (sw.signaled) {
+                /* Chosen as the recipient.  Take ourselves off our own heap --
+                 * safe here and ONLY here, because the heap's only other mutator
+                 * is this same hub thread's timer pop, which cannot be running
+                 * while it is running us.  A no-op (returns 0) when the timer
+                 * already popped us, which is exactly the case where it, not the
+                 * signal, won the enqueue claim. */
+                (void)runloom_sleep_remove(target, g);
+                /* `signaled` is the gate, not signal_target: the wake side
+                 * reserved target->signal_exc with a CAS, so at most one fiber
+                 * per sched is marked, and it is this one.  ACQUIRE pairs with
+                 * that side's RELEASE store from the main thread. */
+                {   PyObject *exc = __atomic_load_n(&target->signal_exc,
+                                                    __ATOMIC_ACQUIRE);
+                    __atomic_store_n(&target->signal_exc, NULL, __ATOMIC_RELAXED);
+                    if (exc != NULL) {
+                        PyObject *tb = PyException_GetTraceback(exc);  /* new or NULL */
+                        /* PyErr_Restore steals all three refs. */
+                        PyErr_Restore((PyObject *)Py_NewRef(Py_TYPE(exc)), exc, tb);
+                        return -1;
+                    }
+                }
+            }
+            return 0;
+        }
         runloom_coro_yield();
         runloom_g_state_set(g, RUNLOOM_GST_RUNNING);
         g->sleep_io = 0;
-        /* No pickup on the hub plane: mn_run's own sigpoll carries a raised
-         * handler out of mn_run and never populates signal_exc, so there is
-         * nothing here to claim.  Deliberate -- see mn_sched_init_fini.c.inc. */
         return 0;
     }
     /* Single-thread path */

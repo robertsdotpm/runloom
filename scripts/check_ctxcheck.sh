@@ -19,9 +19,17 @@ cd "$ROOT" || exit 2
 # A slice that exercises the park/yield seams the assert guards: scheduler,
 # channels, netpoll, aio, cross-thread.  Kept fast; the point is coverage of the
 # yield sites, not the whole matrix.
+# test_signal_recipient / test_signal_armed_parker are here for the two
+# process-wide signal-waiter locks (RUNLOOM_RANK_IOU_SIGWAITER and
+# RUNLOOM_RANK_SLEEP_SIGWAITER).  Both are taken on a park path, immediately
+# before the fiber yields, which is precisely the shape the item-10 assert
+# exists to catch -- and nothing else in this slice parks an io_uring waiter or
+# a sched_sleep_io sleeper, so without these two files those ranks would never
+# be exercised under the checker.
 TESTS="${CTX_TESTS:-test_mn test_mn_park test_adv_sched test_chan test_adv_chan \
   test_tcpconn test_adv_netpoll test_netpoll_conformance test_concurrency \
-  test_aio test_adv_sync test_differential_asyncio}"
+  test_aio test_adv_sync test_differential_asyncio \
+  test_signal_recipient test_signal_armed_parker}"
 # Append .py, exactly as check_dbg_netpoll.sh and check_migration_delay.sh do.
 # This script was the only one of the three missing the line, and the failure was
 # silent: run_isolated matches a file by BASENAME, so a bare "test_mn" is not

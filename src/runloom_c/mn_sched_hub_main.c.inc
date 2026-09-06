@@ -691,6 +691,24 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
             while (h->sched.sleep_size > 0 &&
                    runloom_sched_sleep_peek(&h->sched)->wake_at <= now) {
                 runloom_g_t *woke = runloom_sched_sleep_pop(&h->sched);
+                /* ENQUEUE CLAIM (g->sleep_claimed).  A sleep_io sleeper has a
+                 * second possible scheduler: the main thread, which picks it as
+                 * the recipient of a raised signal handler and wakes it via
+                 * mn_wake_g.  ready_push below is a bare ring push with no
+                 * dedup, so without this claim both could enqueue the same g
+                 * and it would be resumed twice -- onto a coro the first
+                 * run-to-completion may already have freed.  Losing the CAS
+                 * means the signal side got there first and is waking it; drop
+                 * this pop rather than scheduling it again.  Delivery is not
+                 * affected: the exception rides the waiter node, not the
+                 * enqueue.  (Plain sleeps never register a waiter, so nothing
+                 * contends this and the CAS always wins for them.) */
+                {   int cexp = 0;
+                    if (!__atomic_compare_exchange_n(&woke->sleep_claimed, &cexp, 1,
+                                                     0, __ATOMIC_ACQ_REL,
+                                                     __ATOMIC_ACQUIRE))
+                        continue;
+                }
                 if (runloom_use_global_runq()) {
                     /* The timer is a wake, and under a global-runq mode the
                      * sleep release left this g in wake_state PARKED.  Claim it

@@ -1708,18 +1708,24 @@ Py_ssize_t runloom_mn_run(void)
              * signal_exc is atomic because it is now written by one thread and
              * read by another.
              *
-             * TWO PATHS STILL CARRY OUT, and neither is a small extension:
-             *   - io_uring waiters: runloom_iou_sigwaiters is RUNLOOM_TLS, so
-             *     this thread cannot see a hub thread's list at all.  It needs
-             *     a different structure, not a different filter.
-             *   - sched_sleep_io sleepers (select.poll's reprobe):
-             *     runloom_sched_signal_wake_sleeper walks the CALLER's sleep
-             *     heap, and a hub's heap is mutated by its own thread
-             *     concurrently -- reaching it needs a lock that does not exist.
-             * tests/test_signal_recipient.py asserts BOTH: that an fd-parked
-             * hub fiber receives its signal, and that select.poll under M:N
-             * still does not.  Closing either gap should make that second test
-             * fail; flip it to the positive assertion then.
+             * ALL THREE RECIPIENT CLASSES ARE NOW REACHABLE FROM HERE, and
+             * the two that were not both needed a different STRUCTURE rather
+             * than a different filter -- each now registers a stack node in a
+             * process-wide list that this thread can walk:
+             *   - io_uring waiters (runloom_iou_sigwaiters, once it stopped
+             *     being RUNLOOM_TLS).  Note the wake must route by how the
+             *     waiter parked: a hub parker used park_current, which
+             *     wake_safe cannot observe, so it takes mn_wake_g.
+             *   - sched_sleep_io sleepers, select.poll's reprobe
+             *     (runloom_sleep_sigwaiters).  Nothing here touches a hub's
+             *     sleep heap; the sleeper removes ITSELF on its own thread.
+             *     Its one hazard is that the hub's timer pop is a second
+             *     scheduler for the same g -- see g->sleep_claimed.
+             * The fallback below stays exactly as it was and is what keeps
+             * NEVER FETCH A SIGNAL YOU CANNOT DELIVER true here: each arm
+             * returns 0 when it has no recipient, and carry-out is always a
+             * valid delivery, so nothing is ever held waiting for one.
+             * tests/test_signal_recipient.py asserts all three.
              *
              * The still-running hubs are stopped by the caller's mn_fini, the
              * same as the RUNLOOM_DEADLOCK=raise early-return path below. */
@@ -1736,7 +1742,9 @@ Py_ssize_t runloom_mn_run(void)
                     PyErr_Fetch(&st, &sv, &sb);
                     PyErr_NormalizeException(&st, &sv, &sb);
                     if (sv != NULL && sb != NULL) PyException_SetTraceback(sv, sb);
-                    if (sv != NULL && runloom_netpoll_signal_wake(sv)) {
+                    if (sv != NULL && (runloom_netpoll_signal_wake(sv) ||
+                                       runloom_iouring_signal_wake(sv) ||
+                                       runloom_sched_sleep_signal_wake(sv))) {
                         Py_XDECREF(st); Py_XDECREF(sb);
                         saved = PyEval_SaveThread();
                         continue;     /* delivered; the hub fiber raises it */

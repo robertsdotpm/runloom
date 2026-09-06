@@ -50,6 +50,18 @@ typedef enum runloom_lock_rank {
     RUNLOOM_RANK_WAKE_LIST    = 70,   /* sched s->wake_list_lock / owner->wake_list_lock */
     RUNLOOM_RANK_PARKER_POOL  = 80,   /* pool->lock / runloom_pool.lock (netpoll parkers) */
     RUNLOOM_RANK_IOURING_SUB  = 85,   /* runloom_iouring_state.sub_lock (io_uring submit) */
+    RUNLOOM_RANK_IOU_SIGWAITER= 86,   /* runloom_iou_sigwaiter_lock -- the
+                                       * process-wide io_uring signal-waiter
+                                       * list.  Inner to IOURING_SUB (a submit
+                                       * may link a waiter); the wake is done
+                                       * OUTSIDE it, so it nests under nothing. */
+    RUNLOOM_RANK_SLEEP_SIGWAITER = 87, /* runloom_sleep_sigwaiter_lock -- the
+                                       * process-wide sleep_io signal-waiter
+                                       * list.  Same shape and same rules as
+                                       * IOU_SIGWAITER above: a leaf taken only
+                                       * around link/unlink/walk, with the wake
+                                       * issued after it is dropped, so it nests
+                                       * under nothing. */
     RUNLOOM_RANK_IOURING_BRING= 88,   /* s->bring_lock (io_uring provided-buffer ring) */
     RUNLOOM_RANK_BLOCKPOOL    = 90,   /* bp_lock (offload blockpool) */
     RUNLOOM_RANK_RING_LIST    = 100,  /* runloom_ring_list_lock (io_uring rings) */

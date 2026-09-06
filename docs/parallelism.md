@@ -207,22 +207,22 @@ That covers the cooperative calls that park on a file descriptor, which is most
 of them: `recv`, `send`/`send_all`, `accept`, `connect`, `select.select`, and
 `selectors.EpollSelector`.
 
-#### Two paths still interrupt the run instead of the fiber
+It also covers **io_uring completions** when `RUNLOOM_TCPCONN_IOURING` is
+enabled (off by default), for both kinds of operation: a blocked `recv` (a
+multishot receive) and a blocked `send` (a single-shot op) each get the
+interrupt in the fiber's own stack.
 
-Under M:N only, a fiber blocked in one of these does **not** receive the signal;
-it comes out of `runloom.run(...)` instead, and that fiber's `except`/`finally`
-does not run:
+It also covers **`select.poll`** (`selectors.PollSelector`), which has no file
+descriptor of its own and so reprobes on a short sleep rather than parking on
+anything: that sleeping fiber is a signal recipient too.
 
-* **`select.poll`** (`selectors.PollSelector`). A poll object has no file
-  descriptor of its own, so the wrapper reprobes on a short sleep, and the
-  machinery that finds a sleeper only searches the calling thread's own timers.
-* **io_uring completions**, when `RUNLOOM_TCPCONN_IOURING` or
-  `RUNLOOM_IOURING_LOOP` is enabled (both off by default). The list of waiting
-  fibers is thread-local, so another thread cannot see it.
+There are no remaining paths that interrupt the run instead of the fiber.
 
-Nothing is lost either way -- the interrupt reliably arrives at `run()` -- but
-if you rely on a fiber's `finally:` to release something, use a
-descriptor-backed call, or `runloom.run(1, ...)`.
+One requirement, if you use the `monkey` layer: call `runloom.monkey.patch()`
+**before** spawning fibers. Patching wraps the fiber-spawn entry points, and a
+fiber spawned before the patch is not wrapped -- its `select.poll` reprobe then
+degrades to a plain sleep, which is not a signal recipient, and the interrupt
+goes back to coming out of `run()`.
 
 #### How it works
 

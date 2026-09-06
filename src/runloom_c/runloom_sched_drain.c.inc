@@ -451,6 +451,7 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
             if ((__atomic_load_n(&s->netpoll_parked, __ATOMIC_ACQUIRE) > 0 ||
                  runloom_iouring_has_sigwaiter() ||
                  runloom_sched_has_sleep_io_waiter(s) ||
+                 runloom_sched_has_mn_sleep_io_waiter() ||
                  runloom_sched_ready_empty(s)) && PyErr_CheckSignals() < 0) {
                 PyErr_Fetch(&sig_t, &sig_v, &sig_b);
                 PyErr_NormalizeException(&sig_t, &sig_v, &sig_b);
@@ -461,24 +462,38 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
                  * wait_fd).  signal_wake is called only here, after a handler
                  * actually raised -- never on a bare EINTR -- so a fiber is
                  * never woken spuriously. */
-                /* netpoll first, and it is the only one that can target a
-                 * fiber on ANOTHER scheduler (a hub's), so it takes the
-                 * exception directly rather than reading s->signal_exc.  The
-                 * other two serve this sched only and keep the pre-stash. */
-                if (sig_v != NULL && runloom_netpoll_signal_wake(sig_v)) {
+                /* THESE THREE take the exception directly (by argument), and
+                 * the one below reads the pre-stash.  The split is not about
+                 * which recipient class they serve, it is about WHOSE sched
+                 * owns the slot: each of these three can target a fiber on
+                 * ANOTHER scheduler (a hub's), so each reserves that sched's
+                 * signal_exc with a CAS itself.  Passing them s->signal_exc
+                 * would aim the delivery at the wrong scheduler.
+                 *
+                 * Ordered netpoll -> io_uring -> sleeper only because that is
+                 * cheapest-first; they are mutually exclusive in practice (a
+                 * fiber is parked in exactly one of the three ways) and each
+                 * returns 0 when it has no recipient, so the || chain falls
+                 * through to the pre-stash arm and then to carry-out. */
+                if (sig_v != NULL && (runloom_netpoll_signal_wake(sig_v) ||
+                                      runloom_iouring_signal_wake(sig_v) ||
+                                      runloom_sched_sleep_signal_wake(sig_v))) {
                     Py_XDECREF(sig_t); Py_XDECREF(sig_b);
                     sig_t = sig_v = sig_b = NULL;
                     continue;
                 }
                 if (s->signal_exc == NULL && sig_v != NULL) {
                     __atomic_store_n(&s->signal_exc, sig_v, __ATOMIC_RELEASE);
-                    /* io_uring parkers are the second class of fiber whose only
-                     * possible deliverer is this scheduler.  The has_sigwaiter()
-                     * term in the gate above is what keeps this pair honest: we
-                     * only ever consume a signal when one of these two can take
-                     * it. */
-                    if (runloom_iouring_signal_wake() ||
-                        runloom_sched_signal_wake_sleeper(s)) {
+                    /* The pre-stash arm: a sleep_io sleeper on THIS sched
+                     * (the single-thread plane), whose only possible deliverer
+                     * is this scheduler, so it reads s->signal_exc rather than
+                     * taking the exception by argument.  The
+                     * has_sleep_io_waiter() term in the gate above is what
+                     * keeps it honest -- we only ever consume a signal when
+                     * some recipient can take it (NEVER FETCH A SIGNAL YOU
+                     * CANNOT DELIVER).  The hub-sleeper counterpart is
+                     * sleep_signal_wake, in the chain above. */
+                    if (runloom_sched_signal_wake_sleeper(s)) {
                         Py_XDECREF(sig_t); Py_XDECREF(sig_b);
                         sig_t = sig_v = sig_b = NULL;
                         continue;   /* the woken parker raises it in its own stack */

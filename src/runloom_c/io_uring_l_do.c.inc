@@ -4,7 +4,7 @@
 
 /* ============================================================
  * In-fiber delivery of signal-handler exceptions to fibers parked on an
- * io_uring op (single-thread scheduler path).
+ * io_uring op (both the single-thread scheduler and M:N hub paths).
  *
  * The scheduler hands a raised signal-handler exception (Ctrl-C / alarm) to a
  * blocked fiber IN-FIBER -- so the fiber's own try/except/finally runs -- by
@@ -14,39 +14,101 @@
  * hook the exception bypasses the fiber and is carried out of run(), skipping its
  * except/finally (backend-dependent control flow, audited bug).
  *
- * Single-thread io_uring parkers register a stack-allocated node in a
- * THREAD-LOCAL list: park and resume run on the scheduler's own OS thread,
- * cooperatively (never concurrently), and runloom_iouring_signal_wake() is called
- * from that same thread's drain, so the list needs no lock.  signal_wake marks
- * one parker SIGNALED and wakes it; on resume the parker restores the stashed
- * exception into its own tstate and returns -1, mirroring runloom_netpoll_wait_fd.
- * (M:N hub parkers are not registered here; hub signal delivery is separate.) */
+ * An io_uring parker registers a stack-allocated node in the process-wide list
+ * below, then parks.  signal_wake marks one parker SIGNALED and wakes it; on
+ * resume the parker restores the stashed exception into its own tstate and
+ * returns -1, mirroring runloom_netpoll_wait_fd.
+ *
+ * A parker records the HUB it parked on (NULL for the single-thread scheduler)
+ * because the two paths park differently and so must be woken differently:
+ *
+ *   hub == NULL  runloom_sched_park_safe  -> runloom_sched_wake_safe
+ *   hub != NULL  runloom_sched_park_current + runloom_coro_yield
+ *                                         -> runloom_mn_wake_g(hub, g)
+ *
+ * wake_safe is NOT a substitute for the M:N case: it only acts if it wins the
+ * parked_safe 1->0 CAS, and park_current never sets parked_safe (nor park_hub,
+ * which is what wake_safe would route on).  It would bump a wake_pending credit
+ * nobody consumes and return having done nothing, leaving the fiber asleep --
+ * which is exactly how this gap presented: the plumbing all existed, the walk
+ * found the right waiter, and the wake was silently a no-op.
+ *
+ * Waking an M:N parker from the main thread while its CQE lands concurrently is
+ * safe: runloom_mn_wake_g dedups both ways -- PARKED->QUEUED once under the
+ * per-g wake_state machine (per-g-tstate mode), and the in_sub_queue 0->1 CAS in
+ * runloom_mn_hub_submit otherwise -- so the loser of the race drops its wake
+ * rather than enqueuing the g twice. */
 typedef struct runloom_iou_sigwaiter {
     runloom_g_t                    *g;
+    void                           *hub;     /* M:N hub parked on, NULL if single-thread */
     int                             signaled;
     struct runloom_iou_sigwaiter   *next;
     struct runloom_iou_sigwaiter  **pprev;   /* &(the pointer that points at us) */
 } runloom_iou_sigwaiter_t;
 
-static RUNLOOM_TLS runloom_iou_sigwaiter_t *runloom_iou_sigwaiters;
+/* ONE PROCESS-WIDE LIST, NOT THREAD-LOCAL.
+ *
+ * This was RUNLOOM_TLS, which made a hub thread's waiters invisible to the main
+ * thread -- and the main thread is the only one that may run Python signal
+ * handlers.  So under M:N a fiber blocked on an io_uring completion could never
+ * be handed a Ctrl-C: it was not that the walk missed it, the list holding it
+ * could not be reached from the thread doing the walking.
+ *
+ * Waking one cross-thread is already safe and always was: these waiters park
+ * through runloom_sched_park_safe and are woken with runloom_sched_wake_safe,
+ * the protocol built for exactly that (its wake_pending credit is what closes
+ * the wake-before-park race).  Only the LOOKUP was thread-confined, so only the
+ * lookup changes here -- no scheduling-state change, no new wake path.
+ *
+ * The lock covers link/unlink/walk.  These are I/O submission boundaries, not a
+ * hot path: one acquire per parked io_uring op, and the walk runs only when a
+ * signal handler has actually raised. */
+static runloom_iou_sigwaiter_t *runloom_iou_sigwaiters;
+static runloom_mutex_t runloom_iou_sigwaiter_lock;
+static volatile int runloom_iou_sigwaiter_ready;   /* 0 = none, 2 = initialising, 1 = ready */
 
-static void runloom_iou_sigwaiter_link(runloom_iou_sigwaiter_t *w, runloom_g_t *g)
+/* Lazy one-shot init, the same CAS-then-spin shape rl_cancel_lock uses in
+ * io_uring_l_sys.c.inc -- a plain `if (!inited)` would let two hub threads both
+ * mutex_init the same lock. */
+static void runloom_iou_sigwaiter_lock_init(void)
 {
+    int expected = 0;
+    if (__atomic_load_n(&runloom_iou_sigwaiter_ready, __ATOMIC_ACQUIRE) == 1) return;
+    if (__atomic_compare_exchange_n(&runloom_iou_sigwaiter_ready, &expected, 2, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        runloom_mutex_init(&runloom_iou_sigwaiter_lock);
+        __atomic_store_n(&runloom_iou_sigwaiter_ready, 1, __ATOMIC_RELEASE);
+        return;
+    }
+    while (__atomic_load_n(&runloom_iou_sigwaiter_ready, __ATOMIC_ACQUIRE) != 1) { }
+}
+
+static void runloom_iou_sigwaiter_link(runloom_iou_sigwaiter_t *w,
+                                       runloom_g_t *g, void *hub)
+{
+    runloom_iou_sigwaiter_lock_init();
+    RUNLOOM_RLOCK(&runloom_iou_sigwaiter_lock, RUNLOOM_RANK_IOU_SIGWAITER);
     w->g        = g;
+    w->hub      = hub;
     w->signaled = 0;
     w->next     = runloom_iou_sigwaiters;
     w->pprev    = &runloom_iou_sigwaiters;
     if (w->next != NULL) w->next->pprev = &w->next;
     runloom_iou_sigwaiters = w;
+    RUNLOOM_RUNLOCK(&runloom_iou_sigwaiter_lock, RUNLOOM_RANK_IOU_SIGWAITER);
 }
 
 static void runloom_iou_sigwaiter_unlink(runloom_iou_sigwaiter_t *w)
 {
-    if (w->pprev == NULL) return;          /* not linked */
-    *w->pprev = w->next;
-    if (w->next != NULL) w->next->pprev = w->pprev;
-    w->pprev = NULL;
-    w->next  = NULL;
+    runloom_iou_sigwaiter_lock_init();
+    RUNLOOM_RLOCK(&runloom_iou_sigwaiter_lock, RUNLOOM_RANK_IOU_SIGWAITER);
+    if (w->pprev != NULL) {
+        *w->pprev = w->next;
+        if (w->next != NULL) w->next->pprev = w->pprev;
+        w->pprev = NULL;
+        w->next  = NULL;
+    }
+    RUNLOOM_RUNLOCK(&runloom_iou_sigwaiter_lock, RUNLOOM_RANK_IOU_SIGWAITER);
 }
 
 /* Restore the scheduler's stashed signal-handler exception into the CURRENT
@@ -129,23 +191,55 @@ void runloom_iouring_cancel_fd(int fd)
 int runloom_iouring_has_sigwaiter(void)
 {
     runloom_iou_sigwaiter_t *w;
+    runloom_iou_sigwaiter_lock_init();
+    RUNLOOM_RLOCK(&runloom_iou_sigwaiter_lock, RUNLOOM_RANK_IOU_SIGWAITER);
     for (w = runloom_iou_sigwaiters; w != NULL; w = w->next)
-        if (w->g != NULL && !w->signaled) return 1;
+        if (w->g != NULL && !w->signaled) {
+            RUNLOOM_RUNLOCK(&runloom_iou_sigwaiter_lock, RUNLOOM_RANK_IOU_SIGWAITER);
+            return 1;
+        }
+    RUNLOOM_RUNLOCK(&runloom_iou_sigwaiter_lock, RUNLOOM_RANK_IOU_SIGWAITER);
     return 0;
 }
 
-int runloom_iouring_signal_wake(void)
+int runloom_iouring_signal_wake(PyObject *exc)
 {
     runloom_iou_sigwaiter_t *w;
+    runloom_iou_sigwaiter_lock_init();
+    RUNLOOM_RLOCK(&runloom_iou_sigwaiter_lock, RUNLOOM_RANK_IOU_SIGWAITER);
     for (w = runloom_iou_sigwaiters; w != NULL; w = w->next) {
-        if (w->g != NULL && !w->signaled) {
-            w->signaled = 1;
-            runloom_sched_wake_safe(w->g);
-            return 1;
+        runloom_sched_t *tgt;
+        PyObject *slot = NULL;
+        if (w->g == NULL || w->signaled) continue;
+        tgt = w->g->owner;
+        if (tgt == NULL) continue;
+        /* Reserve the TARGET's slot before marking the waiter -- the same order
+         * runloom_netpoll_signal_wake uses, and for the same reason: marking
+         * first and then finding the slot busy would leave a waiter flagged
+         * `signaled` that nobody delivers to, and it would cancel its op and
+         * surface a bare EINTR with no exception.  Under M:N the target is a
+         * HUB's sched, so this store is read by another thread -- RELEASE pairs
+         * with the ACQUIRE in runloom_iou_deliver_signal. */
+        if (!__atomic_compare_exchange_n(&tgt->signal_exc, &slot, exc, 0,
+                                         __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+            continue;                      /* target already holds one */
+        w->signaled = 1;
+        {
+            runloom_g_t *wg  = w->g;
+            void        *whub = w->hub;
+            RUNLOOM_RUNLOCK(&runloom_iou_sigwaiter_lock, RUNLOOM_RANK_IOU_SIGWAITER);
+            /* Outside the lock (both wakes can re-enter scheduler code), and
+             * routed by how this waiter parked -- see the header comment: a hub
+             * parker used park_current, which wake_safe cannot observe. */
+            if (whub != NULL) runloom_mn_wake_g(whub, wg);
+            else              runloom_sched_wake_safe(wg);
         }
+        return 1;
     }
+    RUNLOOM_RUNLOCK(&runloom_iou_sigwaiter_lock, RUNLOOM_RANK_IOU_SIGWAITER);
     return 0;
 }
+
 
 static runloom_iouring_ssize_t runloom_iouring_do(struct io_uring_sqe sqe)
 {
@@ -211,10 +305,57 @@ static runloom_iouring_ssize_t runloom_iouring_do(struct io_uring_sqe sqe)
                  * cleared on resume before the op leaves scope. */
                 if (op.g != NULL)
                     __atomic_store_n(&op.g->iouring_op, &op, __ATOMIC_RELEASE);
-                runloom_sched_park_current();
-                runloom_coro_yield();
-                if (op.g != NULL)
-                    __atomic_store_n(&op.g->iouring_op, NULL, __ATOMIC_RELEASE);
+                /* Cancel-and-RE-PARK loop, the same shape as the single-thread
+                 * branch below and for the same reason: a signal must never
+                 * return this frame while the single-shot SQE is still in
+                 * flight, because the kernel writes the CQE through `op`, which
+                 * lives on this stack -- a use-after-free -- and `op.result`
+                 * would still be the INT32_MIN sentinel.  So on a signal we
+                 * cancel the op and keep parking; the loop exits only once
+                 * op.result is genuinely set (by the real completion or by the
+                 * cancel's -ECANCELED), at which point nothing is in flight.
+                 *
+                 * RE-PARKING IS SOUND HERE.  `op.wait` is a one-way latch that
+                 * only a completing drainer moves (PARKED -> DONE, via the
+                 * exchange in runloom_iouring_ring_drain / l_buf / l_loop), and
+                 * it stores op.result BEFORE that exchange.  A signal wake does
+                 * not touch op.wait, so on re-park it is still PARKED and the
+                 * drainer's `prev == PARKED` test still fires our wake.  We do
+                 * NOT redo the INFLIGHT->PARKED CAS -- there is nothing to redo.
+                 *
+                 * A drainer that completes while we are awake handling the
+                 * signal wakes a RUNNING g; that is the ordinary spurious-wake
+                 * case every park site in the scheduler already loops against,
+                 * and mn_wake_g dedups it (wake_state PARKED->QUEUED once, or
+                 * the in_sub_queue CAS in hub_submit). */
+                {
+                    runloom_iou_sigwaiter_t mn_sw;
+                    int cancelled = 0;
+                    runloom_iou_sigwaiter_link(&mn_sw, op.g, hub);
+                    do {
+                        runloom_sched_park_current();
+                        runloom_coro_yield();
+                        if (mn_sw.signaled && !cancelled) {
+                            cancelled = 1;
+                            runloom_iou_submit_cancel_global(&op);
+                        }
+                    } while (__atomic_load_n(&op.result, __ATOMIC_ACQUIRE)
+                             == INT32_MIN);
+                    runloom_iou_sigwaiter_unlink(&mn_sw);
+                    if (op.g != NULL)
+                        __atomic_store_n(&op.g->iouring_op, NULL,
+                                         __ATOMIC_RELEASE);
+                    if (mn_sw.signaled &&
+                        __atomic_load_n(&op.result, __ATOMIC_ACQUIRE) < 0) {
+                        /* Op ended cancelled/errored: deliver the signal
+                         * in-fiber.  (If it raced to success we fall through
+                         * and return the data; the hub drops the undelivered
+                         * exception at teardown.) */
+                        (void)runloom_iou_deliver_signal(op.g);
+                        errno = EINTR;
+                        return -1;
+                    }
+                }
             }
             /* else prev == DONE: a concurrent drainer completed the op
              * between the load and the CAS; op.result is set, fall through. */
@@ -239,7 +380,7 @@ static runloom_iouring_ssize_t runloom_iouring_do(struct io_uring_sqe sqe)
             /* Register for in-fiber signal delivery (see runloom_iou_sigwaiter_*):
              * a Ctrl-C/alarm handler that raises while we're parked should
              * propagate through THIS fiber, not out of run(). */
-            runloom_iou_sigwaiter_link(&sw, op.g);
+            runloom_iou_sigwaiter_link(&sw, op.g, NULL);
             do {
                 runloom_sched_park_safe();
                 if (sw.signaled && !cancelled) {
@@ -669,6 +810,12 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
             runloom_iouwake_trace_event("SUBMIT",
                                         (unsigned long)(uintptr_t)park_g, 0);
             RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
+            /* Register for in-fiber signal delivery on BOTH park paths: a
+             * Ctrl-C / alarm handler that raises while we're parked must
+             * propagate through THIS fiber's except/finally, not out of
+             * run()/mn_run().  signal_wake routes the wake by the hub recorded
+             * here (see the runloom_iou_sigwaiter_* header comment). */
+            runloom_iou_sigwaiter_link(&sw, park_g, hub);
             if (hub != NULL) {
                 /* PARK -- do NOT spin-drain.  A blocking io_uring_enter here
                  * holds this hub's tstate ATTACHED across the wait, which
@@ -688,13 +835,9 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
                 runloom_sched_park_current();
                 runloom_coro_yield();
             } else {
-                /* Single-thread: also register for in-fiber signal delivery so a
-                 * Ctrl-C/alarm handler that raises while we're parked propagates
-                 * through THIS fiber (its except/finally), not out of run(). */
-                runloom_iou_sigwaiter_link(&sw, park_g);
                 runloom_sched_park_safe();
-                runloom_iou_sigwaiter_unlink(&sw);
             }
+            runloom_iou_sigwaiter_unlink(&sw);
             /* IOUWAKE-TRACE: the woken submitter has returned from its park and
              * re-reads the handle -- the model's RESUME(g) (iouring-specific
              * resume point, l_do post-yield).  Pairs with the SUBMIT above. */

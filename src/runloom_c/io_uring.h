@@ -61,7 +61,12 @@ int runloom_iouring_inflight(void);
  * comment claimed "the single-thread drain calls it after netpoll_signal_wake
  * finds no parker", and `git log -S` says it never did.  A fiber blocked on a
  * CQE could not receive a signal at all. */
-int runloom_iouring_signal_wake(void);
+/* PyObject* -- this header is included where Python.h may not be, so the
+ * struct is forward-declared at FILE scope: naming it only inside the
+ * prototype would declare a fresh type scoped to that prototype, which
+ * then conflicts with the real PyObject at the definition. */
+struct _object;
+int runloom_iouring_signal_wake(struct _object *exc);
 int runloom_iouring_has_sigwaiter(void);
 
 /* Cancel a fiber parked on a single (global-ring) io_uring op: submit an

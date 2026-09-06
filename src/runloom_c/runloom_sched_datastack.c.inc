@@ -520,6 +520,164 @@ static int runloom_sleep_remove(runloom_sched_t *s, runloom_g_t *g)
     return 1;
 }
 
+/* ====================================================================
+ * Cross-thread signal delivery to an M:N sleep_io sleeper.
+ *
+ * runloom_sched_signal_wake_sleeper (below) walks the CALLER's sleep heap, which
+ * is right for the single-thread plane and useless under M:N: a hub fiber
+ * sleeping in select.poll's reprobe sits in ITS HUB's heap, and only the main
+ * thread may run Python signal handlers.  Locking a hub's heap from here is not
+ * an option -- the hub mutates it on every timer tick.
+ *
+ * So a hub sleeper REGISTERS a stack node in this process-wide list instead,
+ * exactly as an io_uring parker does (see runloom_iou_sigwaiter_* in
+ * io_uring_l_do.c.inc).  Nothing here touches a hub's heap: the main thread
+ * only marks a node and issues a wake, and the sleeper does its own heap
+ * removal on its own thread when it resumes.
+ *
+ * NO BOUNDED HOLD.  The list walk is the whole decision: it either finds a
+ * registered sleeper and the caller returns 1 (delivered), or it finds none and
+ * the caller falls back to carrying the exception out of run() -- which is what
+ * that path did unconditionally before.  The exception is never parked in a
+ * mailbox waiting for a recipient to reappear, which is the property that made
+ * dd8d0008's design unsafe.
+ *
+ * The lock covers link/unlink/walk.  A link costs one uncontended acquire per
+ * cooperative-blocking reprobe (50 ms apart by default -- _SELECTOR_REPROBE_S),
+ * and the walk runs only once a handler has actually raised. */
+typedef struct runloom_sleep_sigwaiter {
+    runloom_g_t                     *g;
+    void                            *hub;    /* hub the sleeper parked on */
+    runloom_sched_t                 *sched;  /* that hub's sched: owns signal_exc */
+    int                              signaled;
+    struct runloom_sleep_sigwaiter  *next;
+    struct runloom_sleep_sigwaiter **pprev;
+} runloom_sleep_sigwaiter_t;
+
+static runloom_sleep_sigwaiter_t *runloom_sleep_sigwaiters;
+static runloom_mutex_t runloom_sleep_sigwaiter_lock;
+static volatile int runloom_sleep_sigwaiter_ready;   /* 0 none, 2 initialising, 1 ready */
+
+/* Lazy one-shot init -- the CAS-then-spin shape used by rl_cancel_lock and the
+ * io_uring sigwaiter lock; a plain `if (!inited)` would let two hub threads
+ * both mutex_init the same lock. */
+static void runloom_sleep_sigwaiter_lock_init(void)
+{
+    int expected = 0;
+    if (__atomic_load_n(&runloom_sleep_sigwaiter_ready, __ATOMIC_ACQUIRE) == 1) return;
+    if (__atomic_compare_exchange_n(&runloom_sleep_sigwaiter_ready, &expected, 2, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        runloom_mutex_init(&runloom_sleep_sigwaiter_lock);
+        __atomic_store_n(&runloom_sleep_sigwaiter_ready, 1, __ATOMIC_RELEASE);
+        return;
+    }
+    while (__atomic_load_n(&runloom_sleep_sigwaiter_ready, __ATOMIC_ACQUIRE) != 1) { }
+}
+
+static void runloom_sleep_sigwaiter_link(runloom_sleep_sigwaiter_t *w,
+                                         runloom_g_t *g, void *hub,
+                                         runloom_sched_t *sched)
+{
+    runloom_sleep_sigwaiter_lock_init();
+    RUNLOOM_RLOCK(&runloom_sleep_sigwaiter_lock, RUNLOOM_RANK_SLEEP_SIGWAITER);
+    w->g        = g;
+    w->hub      = hub;
+    w->sched    = sched;
+    w->signaled = 0;
+    w->next     = runloom_sleep_sigwaiters;
+    w->pprev    = &runloom_sleep_sigwaiters;
+    if (w->next != NULL) w->next->pprev = &w->next;
+    runloom_sleep_sigwaiters = w;
+    RUNLOOM_RUNLOCK(&runloom_sleep_sigwaiter_lock, RUNLOOM_RANK_SLEEP_SIGWAITER);
+}
+
+static void runloom_sleep_sigwaiter_unlink(runloom_sleep_sigwaiter_t *w)
+{
+    runloom_sleep_sigwaiter_lock_init();
+    RUNLOOM_RLOCK(&runloom_sleep_sigwaiter_lock, RUNLOOM_RANK_SLEEP_SIGWAITER);
+    if (w->pprev != NULL) {
+        *w->pprev = w->next;
+        if (w->next != NULL) w->next->pprev = w->pprev;
+        w->pprev = NULL;
+        w->next  = NULL;
+    }
+    RUNLOOM_RUNLOCK(&runloom_sleep_sigwaiter_lock, RUNLOOM_RANK_SLEEP_SIGWAITER);
+}
+
+/* Gate predicate: is any hub fiber parked in a cooperative reprobe sleep?
+ * Keeps NEVER FETCH A SIGNAL YOU CANNOT DELIVER true for this recipient class --
+ * the caller must not run handlers unless some deliverable exists. */
+int runloom_sched_has_mn_sleep_io_waiter(void)
+{
+    int found = 0;
+    runloom_sleep_sigwaiter_t *w;
+    runloom_sleep_sigwaiter_lock_init();
+    RUNLOOM_RLOCK(&runloom_sleep_sigwaiter_lock, RUNLOOM_RANK_SLEEP_SIGWAITER);
+    for (w = runloom_sleep_sigwaiters; w != NULL; w = w->next)
+        if (w->g != NULL && !w->signaled) { found = 1; break; }
+    RUNLOOM_RUNLOCK(&runloom_sleep_sigwaiter_lock, RUNLOOM_RANK_SLEEP_SIGWAITER);
+    return found;
+}
+
+/* Hand `exc` to one registered hub sleeper.  Returns 1 if a recipient was
+ * marked (the fiber WILL raise it at its resume point), 0 if there is none and
+ * the caller must fall back to carrying it out of run().
+ *
+ * Marking happens under the lock, which is what makes it safe against a
+ * sleeper that is concurrently waking: the sleeper unlinks its node under this
+ * same lock BEFORE testing `signaled`, so a node we can still see belongs to a
+ * fiber that has not yet finished its post-yield check, and it will observe the
+ * mark.  Reserving the target's signal_exc slot comes FIRST, the same order the
+ * netpoll and io_uring arms use: marking first and then finding the slot busy
+ * would leave a fiber flagged with nobody delivering to it. */
+int runloom_sched_sleep_signal_wake(PyObject *exc)
+{
+    runloom_sleep_sigwaiter_t *w;
+    runloom_sleep_sigwaiter_lock_init();
+    RUNLOOM_RLOCK(&runloom_sleep_sigwaiter_lock, RUNLOOM_RANK_SLEEP_SIGWAITER);
+    for (w = runloom_sleep_sigwaiters; w != NULL; w = w->next) {
+        runloom_sched_t *tgt = w->sched;
+        PyObject *slot = NULL;
+        runloom_g_t *g;
+        void *hub;
+        int claimed;
+        if (w->g == NULL || w->signaled || tgt == NULL) continue;
+        /* RELEASE: read by the hub thread in the sleeper's pickup. */
+        if (!__atomic_compare_exchange_n(&tgt->signal_exc, &slot, exc, 0,
+                                         __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+            continue;                       /* that hub already holds one */
+        w->signaled = 1;
+        /* NOTE: no signal_target write.  That field is the single-thread
+         * plane's gate, and setting it here would be a plain cross-thread
+         * store racing the hub's own read/clear.  It is also redundant: the
+         * signal_exc CAS above admits exactly ONE recipient per sched, and
+         * `signaled` on this node -- set under the lock the sleeper unlinks
+         * under -- names which fiber that is.  The io_uring arm
+         * (runloom_iou_deliver_signal) gates the same way. */
+        g   = w->g;
+        hub = w->hub;
+        /* Claim the right to ENQUEUE it (see g->sleep_claimed).  Losing means
+         * the hub's timer pop already took the sleeper off the heap and will
+         * schedule it -- we must not enqueue it a second time, and we don't
+         * need to: it is already on its way to the post-yield check that
+         * consumes the mark above. */
+        {   int expected = 0;
+            claimed = __atomic_compare_exchange_n(&g->sleep_claimed, &expected, 1,
+                                                  0, __ATOMIC_ACQ_REL,
+                                                  __ATOMIC_ACQUIRE);
+        }
+        RUNLOOM_RUNLOCK(&runloom_sleep_sigwaiter_lock, RUNLOOM_RANK_SLEEP_SIGWAITER);
+        /* Outside the lock: the wake re-enters scheduler code. */
+        if (claimed) {
+            if (hub != NULL) runloom_mn_wake_g(hub, g);
+            else             runloom_sched_wake_safe(g);
+        }
+        return 1;
+    }
+    RUNLOOM_RUNLOCK(&runloom_sleep_sigwaiter_lock, RUNLOOM_RANK_SLEEP_SIGWAITER);
+    return 0;
+}
+
 /* Is any fiber of `s` sleeping inside a cooperative blocking call? */
 int runloom_sched_has_sleep_io_waiter(runloom_sched_t *s)
 {

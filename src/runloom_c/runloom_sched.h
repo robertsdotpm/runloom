@@ -285,6 +285,25 @@ struct runloom_g {
      * scheduler otherwise cannot draw between it and an application
      * time.sleep(), which are byte-identical at this layer. */
     int sleep_io;
+    /* SLEEP CLAIM -- makes a sleep_io sleeper's resume EXACTLY-ONCE across its
+     * two possible schedulers.  A hub sleeper can be made runnable either by
+     * its deadline (the hub's own timer pop in mn_sched_hub_main) or, when a
+     * signal handler raises, by the MAIN thread choosing it as the recipient.
+     * Both would otherwise enqueue it -- the timer via ready_push (a bare ring
+     * push, no dedup) and the signal via mn_wake_g -- and a g scheduled twice
+     * is resumed twice, which lands on a coro that the first run-to-completion
+     * may already have destroyed.
+     *
+     * So both sides CAS 0->1 here and only the winner enqueues; the loser
+     * leaves the scheduling to whoever won.  Delivery is unaffected either way:
+     * the exception is claimed from the waiter node, not from the enqueue, so a
+     * signal that LOSES the claim is still picked up when the timer's resume
+     * reaches the sleeper's post-yield check.
+     *
+     * Reset to 0 by the sleeper itself, on its own thread, before it re-links
+     * and re-parks (runloom_sched_sleep_until_ex).  Single-thread-plane sleeps
+     * never touch it -- there the drain owns both paths already. */
+    int sleep_claimed;
     /* Race-safe park/wake counter.  runloom_sched_park_safe decrements;
      * if >0, the wake already arrived and we skip the yield.
      * runloom_sched_wake_safe increments and (if g is currently parked)
@@ -746,6 +765,10 @@ int runloom_sched_sleep_until_io(runloom_sched_t *s, double wake_at);
  * one be handed a raised signal?  The gate in runloom_sched_drain asks the
  * first before consuming a signal; the second performs the delivery. */
 int runloom_sched_has_sleep_io_waiter(runloom_sched_t *s);
+/* M:N counterparts: the recipient is a hub sleeper, found through the
+ * process-wide waiter list rather than the caller's own sleep heap. */
+int runloom_sched_has_mn_sleep_io_waiter(void);
+int runloom_sched_sleep_signal_wake(PyObject *exc);
 int runloom_sched_signal_wake_sleeper(runloom_sched_t *s);
 
 /* Park the current g on the quiescence-barrier list; the drain loop resumes

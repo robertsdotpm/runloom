@@ -459,28 +459,217 @@ def test_signal_reaches_a_hub_fiber(hubs):
 
 @needs_sigalrm
 @needs_mn
-def test_mn_signal_parity_gap_is_still_open():
-    """select.poll in a HUB fiber still does NOT get its own signal.
+@pytest.mark.skipif(not _IOURING, reason="io_uring not available")
+def test_mn_signal_reaches_a_hub_fiber_parked_on_io_uring():
+    """Same contract as the netpoll M:N test, but parked on a CQE.
 
-    This test asserts the LIMIT, not the capability, so the gap is recorded
-    rather than assumed closed.  Two paths remain on carry-out under M:N and
-    neither is a small extension:
+    `RUNLOOM_TCPCONN_IOURING=1` routes the same `recv` through the multishot
+    io_uring path instead of netpoll, so this is the io_uring arm of M:N
+    delivery.  Measured `who=out-of-mn_run` 5/5 before the fix.
 
-      * io_uring waiters -- `runloom_iou_sigwaiters` is RUNLOOM_TLS, so the
-        main thread cannot see a hub thread's list at all.
-      * select.poll sleepers -- runloom_sched_signal_wake_sleeper walks the
-        CALLER's sleep heap, and a hub's heap is mutated by its own thread
-        concurrently, so reaching it needs a lock that does not exist yet.
+    TWO defects, and the first hid the second:
 
-    If you close either, this test should start failing.  That is the point:
-    flip it to the positive assertion then, and delete this docstring.
+    1. `runloom_iou_sigwaiters` was RUNLOOM_TLS, so a hub thread's waiters were
+       not merely missed by the walk -- the list holding them was unreachable
+       from the main thread, the only thread that may run Python signal
+       handlers.  Made process-wide under a lock.
+
+    2. With the list shared, the walk then found the right waiter and the wake
+       still did nothing, because the M:N branch parks with
+       `runloom_sched_park_current` + `runloom_coro_yield` while
+       `runloom_sched_wake_safe` only acts if it wins the `parked_safe` 1->0
+       CAS -- a flag `park_current` never sets.  It bumped a `wake_pending`
+       credit nobody consumes and returned success.  A parker now records the
+       hub it parked on and the wake routes `runloom_mn_wake_g` for a hub.
+
+    Racing the CQE's own wake is safe: mn_wake_g dedups (PARKED->QUEUED once
+    under the wake_state machine; the in_sub_queue CAS in hub_submit
+    otherwise), so the loser drops rather than double-queueing the g.
     """
-    p = _run(_MN.replace(
-        'c.recv(64)                    # no peer data -> parks on this hub\'s netpoll',
-        'import selectors, runloom.monkey; runloom.monkey.patch()\n'
-        '        sel = selectors.PollSelector(); sel.register(sc.fileno(), selectors.EVENT_READ)\n'
-        '        sel.select(5); sel.close()'), timeout=120)
-    assert "MN who=out-of-mn_run" in p.stdout or "MN who=returned" in p.stdout, (
-        "select.poll under M:N now receives its own signal -- the parity gap "
-        "has been closed, so flip this test to assert the capability: %r"
-        % p.stdout.strip())
+    p = _run(_MN, env_extra={"RUNLOOM_TCPCONN_IOURING": "1"}, timeout=120)
+    assert "SystemError" not in p.stderr, (
+        "a delivered signal was overwritten by OSError in the io_uring arm\n%s"
+        % p.stderr[-1500:])
+    assert "MN who=fiber finally_ran=True" in p.stdout, (
+        "the interrupt did not reach the hub fiber parked on a CQE: %r\n"
+        "stdout=%s\nstderr=%s"
+        % (p.stdout.strip(), p.stdout, p.stderr[-1500:]))
+
+
+# A blocked SEND has no multishot variant, so it parks on a SINGLE-SHOT io_uring
+# op -- the other half of io_uring delivery, and a different park site from the
+# multishot recv above (a hub owns its own ring whenever any io_uring feature is
+# enabled, so runloom_iouring_send routes to runloom_iouring_ring_do, not the
+# global-ring runloom_iouring_do).
+_MN_SINGLEOP = r'''
+import faulthandler, os, signal, socket, sys
+sys.path.insert(0, "src")
+import runloom_c as rc
+HUBS = int(os.environ.get("MN_HUBS", "4"))
+box = {}
+def raiser(signum, frame):
+    raise KeyboardInterrupt("alarm")
+signal.signal(signal.SIGALRM, raiser)
+
+def worker():
+    L = rc.TCPConn.listen("127.0.0.1", 0)
+    s = socket.socket(fileno=os.dup(L.fileno()))
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    port = s.getsockname()[1]; s.detach()
+    c = rc.TCPConn.connect("127.0.0.1", port)
+    cs = socket.socket(fileno=os.dup(c.fileno()))
+    cs.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+    cs.detach()
+    sc = L.accept()                       # never read from -> the peer window fills
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 0.4)
+        c.send_all(b"x" * (8 * 1024 * 1024))   # parks on a single-shot SEND CQE
+        box["who"] = "returned"
+    except KeyboardInterrupt:
+        box["who"] = "fiber"
+    except OSError as e:
+        box["who"] = "oserror:%s" % e.errno
+    finally:
+        box["finally_ran"] = True
+    try:
+        sc.close(); c.close(); L.close()
+    except Exception:
+        pass
+
+faulthandler.dump_traceback_later(25, exit=True)
+rc.mn_init(HUBS); rc.mn_fiber(worker)
+try:
+    rc.mn_run()
+except KeyboardInterrupt:
+    box.setdefault("who", "out-of-mn_run")
+try: rc.mn_fini()
+except Exception: pass
+faulthandler.cancel_dump_traceback_later()
+sys.stdout.write("MN-SINGLEOP who=%s finally_ran=%s\n"
+                 % (box.get("who"), box.get("finally_ran", False)))
+'''
+
+
+@needs_sigalrm
+@needs_mn
+@pytest.mark.skipif(not _IOURING, reason="io_uring not available")
+def test_mn_signal_reaches_a_hub_fiber_parked_on_a_single_shot_op():
+    """A blocked send parks on a SINGLE-SHOT CQE, and gets the signal in-fiber.
+
+    Distinct from the multishot test above, and it is the harder half.  A
+    multishot waiter can just be woken and returned: its buffers live on the
+    shared handle, so leaving early strands nothing.  A single-shot op cannot,
+    because the kernel writes its CQE through the `op` record on the PARKED
+    FIBER'S OWN STACK -- returning while it is in flight is a use-after-free,
+    and op.result is still the INT32_MIN sentinel.
+
+    So the signal path here cancels the op and KEEPS PARKING, exiting only once
+    op.result is genuinely set (real completion, or the cancel's -ECANCELED).
+    Re-parking works because op.wait is a one-way latch only a completing
+    drainer moves, and the drainer stores op.result before that exchange -- a
+    signal wake leaves it PARKED, so the drainer still fires our wake.
+
+    Measured `who=out-of-mn_run finally_ran=False` before, 50/50
+    `who=fiber finally_ran=True` after (10 runs each at 1/2/4/8/16 hubs).
+    """
+    p = _run(_MN_SINGLEOP, env_extra={"RUNLOOM_TCPCONN_IOURING": "1"}, timeout=120)
+    assert "SystemError" not in p.stderr, (
+        "a delivered signal was overwritten by OSError in the io_uring arm\n%s"
+        % p.stderr[-1500:])
+    assert "MN-SINGLEOP who=fiber finally_ran=True" in p.stdout, (
+        "the interrupt did not reach the hub fiber parked on a single-shot op; "
+        "who=%r\nstdout=%s\nstderr=%s"
+        % (p.stdout.strip(), p.stdout, p.stderr[-1500:]))
+
+
+_MN_POLL = r'''
+import faulthandler, os, signal, socket, sys
+sys.path.insert(0, "src")
+import runloom_c as rc
+# PATCH BEFORE SPAWNING.  monkey.patch() wraps runloom_c.mn_fiber, and that
+# wrapper is what bumps the thread-local counter _co_sleep_io tests; a fiber
+# spawned through the UNPATCHED mn_fiber never gets wrapped, so its reprobe
+# silently degrades to a plain sched_sleep and never registers as a signal
+# recipient.  An earlier version of this test patched inside the worker and so
+# never exercised CoPoll's sleep_io path at all.
+import runloom.monkey; runloom.monkey.patch()
+import selectors
+
+HUBS = int(os.environ.get("MN_HUBS", "4"))
+box = {}
+def raiser(signum, frame):
+    raise KeyboardInterrupt("alarm")
+signal.signal(signal.SIGALRM, raiser)
+
+def worker():
+    L = rc.TCPConn.listen("127.0.0.1", 0)
+    s = socket.socket(fileno=os.dup(L.fileno()))
+    port = s.getsockname()[1]; s.detach()
+    c = rc.TCPConn.connect("127.0.0.1", port)
+    sc = L.accept()
+    sel = selectors.PollSelector()
+    box["inner"] = type(getattr(sel, "_selector", None)).__name__
+    try:
+        sel.register(sc.fileno(), selectors.EVENT_READ)
+        sel.select(5)                 # CoPoll: poll(0) + sched_sleep_io reprobe
+        sel.close()
+        box["who"] = "returned"
+    except KeyboardInterrupt:
+        box["who"] = "fiber"
+    finally:
+        box["finally_ran"] = True
+    try:
+        sc.close(); c.close(); L.close()
+    except Exception:
+        pass
+
+faulthandler.dump_traceback_later(30, exit=True)
+rc.mn_init(HUBS); rc.mn_fiber(worker)
+signal.setitimer(signal.ITIMER_REAL, 0.4)
+try:
+    rc.mn_run()
+except KeyboardInterrupt:
+    box.setdefault("who", "out-of-mn_run")
+try: rc.mn_fini()
+except Exception: pass
+faulthandler.cancel_dump_traceback_later()
+sys.stdout.write("MN-POLL who=%s finally_ran=%s inner=%s\n"
+                 % (box.get("who"), box.get("finally_ran", False), box.get("inner")))
+'''
+
+
+@needs_sigalrm
+@needs_mn
+def test_mn_signal_reaches_a_hub_fiber_sleeping_in_select_poll():
+    """select.poll in a HUB fiber gets its own signal.  The last gap, closed.
+
+    A poll object has no kernel fd, so CoPoll drains with poll(0) and reprobes
+    on sched_sleep_io.  That sleeper lives in ITS HUB's sleep heap, and only the
+    main thread may run Python signal handlers -- and the main thread must not
+    touch a hub's heap, which the hub mutates on every timer tick.  That is why
+    this was the last path still carrying out of mn_run.
+
+    The fix does not reach into the heap at all.  A sleep_io sleeper registers a
+    stack node in a process-wide list (the same idiom the io_uring parkers use),
+    the main thread marks a node and issues the wake, and the sleeper removes
+    itself from its own heap on its own thread when it resumes.
+
+    The subtle part is that a hub sleeper has TWO possible schedulers -- its
+    deadline (the hub's timer pop) and the signal wake -- and ready_push has no
+    dedup, so both enqueuing it would resume the fiber twice onto a coro the
+    first run-to-completion may already have freed.  Both sides now CAS
+    g->sleep_claimed and only the winner enqueues; delivery is unaffected either
+    way because the exception rides the waiter node, not the enqueue.
+
+    Measured `who=out-of-mn_run finally_ran=False` before, 50/50
+    `who=fiber finally_ran=True` after (10 runs each at 1/2/4/8/16 hubs).
+    """
+    p = _run(_MN_POLL, timeout=120)
+    assert "inner=CoPoll" in p.stdout, (
+        "the workload did not go through CoPoll, so it never exercised the "
+        "sleep_io reprobe -- check the monkey.patch() ordering: %r\nstderr=%s"
+        % (p.stdout.strip(), p.stderr[-1500:]))
+    assert "MN-POLL who=fiber finally_ran=True" in p.stdout, (
+        "the interrupt did not reach the hub fiber sleeping in select.poll: "
+        "%r\nstdout=%s\nstderr=%s"
+        % (p.stdout.strip(), p.stdout, p.stderr[-1500:]))
