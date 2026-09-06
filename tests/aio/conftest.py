@@ -16,6 +16,7 @@ The vendored bodies are untouched, so they stay diffable against CPython upstrea
 """
 import asyncio
 import os
+import sys
 import unittest
 import warnings
 
@@ -23,6 +24,47 @@ import pytest
 
 import runloom.aio as paio
 from . import skips
+
+
+# ---- interpreter floor ------------------------------------------------------
+# The bodies in this package are pinned from CPython 3.14.4 (see __init__.py) and
+# are a conformance suite against THAT asyncio, so they are not meaningful on an
+# older interpreter -- they do not merely fail, they fail to import:
+#
+#   test_locks.py       re.compile(r'...\z')  -- \z is a 3.14 re escape; 3.13
+#                       raises "bad escape \z" at module level.
+#   utils.py            open(data_file('certdata', 'keycert3.pem.reference'))
+#                       -- that data file only exists in 3.14's test tree, so
+#                       test_server.py and test_sock_lowlevel.py die importing it.
+#
+# CI runs the matrix on 3.13.13 as well as 3.14.4, so those four modules were
+# reddening every 3.13 leg with collection errors.  Ignoring collection makes
+# pytest exit 5 ("no tests collected"), which tests/run_isolated.py already
+# treats as a SKIP -- and a genuine import error still exits 2, so this does not
+# mask a broken file on 3.14.
+#
+# Do NOT convert this into per-test entries in skips.py: those apply to
+# collected items, and these modules fail before any item exists.
+AIO_MIN_PYTHON = (3, 14)
+_TOO_OLD = sys.version_info < AIO_MIN_PYTHON
+
+# This covers `pytest tests/aio` (a directory walk) ONLY.  It does NOT cover a
+# module named explicitly on the command line: pytest collects a path you ask
+# for by name and consults neither collect_ignore_glob nor pytest_ignore_collect
+# for it (verified on pytest 9.0.3 -- this conftest loads, its report header
+# prints, and the module is imported and errors anyway).  tests/run_isolated.py
+# runs exactly that way, one module per subprocess, so it carries its own copy
+# of this floor; see the SUITE == "aio" guard there.  Both must agree.
+if _TOO_OLD:
+    collect_ignore_glob = ["test_*.py"]
+
+
+def pytest_report_header(config):
+    if _TOO_OLD:
+        return ("tests/aio: skipped entirely -- bodies are pinned from CPython "
+                "%d.%d and this is %d.%d"
+                % (AIO_MIN_PYTHON + sys.version_info[:2]))
+    return None
 
 
 def install_policy():
@@ -33,7 +75,11 @@ def install_policy():
         asyncio.set_event_loop_policy(paio.RunloomEventLoopPolicy())
 
 
-install_policy()
+# Skip on an interpreter below the floor: the suite is not going to run, and
+# set_event_loop_policy is process-global, so installing it would leak the
+# bridge policy into anything else sharing the session.
+if not _TOO_OLD:
+    install_policy()
 
 
 def make_runloom_loop(self, *args, **kwargs):

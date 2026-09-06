@@ -175,7 +175,7 @@ for round in $(seq 1 "$ITERS"); do
     done
     [ "$fail" = 1 ] && break
     # Only keep artifacts from the failing round.
-    rm -rf "${logs[@]}" "${metas[@]}" 2>/dev/null
+    rm -rf ${logs[@]+"${logs[@]}"} ${metas[@]+"${metas[@]}"} 2>/dev/null
     printf '.'
     [ $((round % 50)) -eq 0 ] && printf ' %d\n' "$round"
 done

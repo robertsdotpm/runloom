@@ -24,6 +24,18 @@ from collections import deque
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
+import pytest
+
+# hypothesis is BEST-EFFORT, by the installer's own design: below 3.14 its
+# transitive deps have no free-threaded wheels, so tools/ci/test_patched_cpython.sh
+# does `pip install -q hypothesis 2>/dev/null` and carries on when that fails.
+# A hard top-level import here turned that tolerated absence into a collection
+# ERROR -- which is how the first scheduled CI run went red on ubuntu/3.13.13
+# with `ModuleNotFoundError: No module named 'hypothesis'` while every runloom
+# test passed.  Skip the module instead, so "not installed" means "not run"
+# rather than "failed".
+pytest.importorskip("hypothesis", reason="hypothesis is optional (best-effort install)")
+
 from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule

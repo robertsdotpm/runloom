@@ -235,6 +235,16 @@ jobs:
           echo "RL_CI_WORK=${{ runner.temp }}/rl-ci" >> "$GITHUB_ENV"
           echo "RL_CI_RELEASE_PREFIX=${{ runner.temp }}/rl-prefix" >> "$GITHUB_ENV"
 
+      # Go builds tools/lincheck/porcupine -- the linearizability checker.  The
+      # ubuntu image ships Go on PATH and the macOS one does not, so the macOS
+      # legs failed with "go: command not found".  check_lin.sh now SKIPS rather
+      # than failing when Go is absent, so this step is what keeps the check
+      # actually running on macOS instead of being quietly skipped there.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: false
+
       # Provision: build from source when an interpreter input changed, else
       # download the newest matching Release (falls back to a build on a miss).
       - name: Provide patched CPython ${{ matrix.version }}

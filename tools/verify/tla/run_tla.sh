@@ -109,11 +109,17 @@ run_tlc() {
     #   ExitOnOutOfMemoryError is deliberately NOT set: we want the dump and
     #     the stack trace in the log, not a silent exit.
     #   TLC_JDWP=1 opens a debugger port (non-suspending) for a live attach.
+    # Expanded as ${jdwp[@]+"${jdwp[@]}"}, not "${jdwp[@]}": under `set -u`
+    # bash 3.2 -- which is what macOS ships, and the only bash the macOS CI
+    # legs have -- treats expanding an EMPTY array as an unbound variable and
+    # aborts.  bash 4.4+ does not, so this passed on Linux and failed every
+    # macOS leg with `jdwp[@]: unbound variable`, which surfaced as TLC
+    # "produced no recognised verdict" and a wall of spurious spec FAILs.
     local jdwp=()
     [ "${TLC_JDWP:-}" = "1" ] && jdwp=(-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:${TLC_JDWP_PORT:-5005})
     ( cd "$HERE" && java "-Xmx${TLC_XMX:-1g}" "-Djava.io.tmpdir=$META/$1.tmp" \
         -XX:+HeapDumpOnOutOfMemoryError "-XX:HeapDumpPath=$META/$1.hprof" \
-        "${jdwp[@]}" -cp "$JAR" tlc2.TLC \
+        ${jdwp[@]+"${jdwp[@]}"} -cp "$JAR" tlc2.TLC \
         -workers "${TLC_WORKERS:-4}" -metadir "$META/$1" "${@:2}" 2>&1 ) \
         | tee "$_log"
 }

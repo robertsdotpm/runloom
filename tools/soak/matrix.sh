@@ -139,7 +139,7 @@ esac
 export PYTHON_GIL=0 PYTHONPATH="$ROOT/src"
 echo "-- soak: $WORKLOAD $DUR workers=$WORKERS build=$BUILD ${ENVS[*]:-} --"
 $SA "$PY" tools/soak/soak.py --workload "$WORKLOAD" $DUR --workers "$WORKERS" \
-    --interval 30 --out "$OUT" --stamp "$STAMP" "${ENVS[@]}"
+    --interval 30 --out "$OUT" --stamp "$STAMP" ${ENVS[@]+"${ENVS[@]}"}
 SOAK_RC=$?
 
 # sanitizer log triage (if a sanitizer build)

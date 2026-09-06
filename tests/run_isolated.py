@@ -314,6 +314,27 @@ def main(argv):
     if not files:
         files = discover()
 
+    # INTERPRETER FLOOR for the vendored asyncio suite.  tests/aio holds bodies
+    # pinned from CPython 3.14.4 (tests/aio/__init__.py) and they do not merely
+    # fail on an older interpreter, they fail to IMPORT: test_locks.py compiles
+    # a regex using \z (a 3.14 re escape) at module level, and utils.py opens
+    # certdata/keycert3.pem.reference, a data file that only exists in 3.14's
+    # test tree, which kills test_server.py and test_sock_lowlevel.py.  CI runs
+    # the matrix on 3.13.13 as well, so those four reddened every 3.13 leg.
+    #
+    # The guard has to live HERE rather than in tests/aio/conftest.py: this
+    # runner names each module explicitly on pytest's command line (per-file
+    # subprocess isolation), and pytest deliberately collects a path you name,
+    # so neither collect_ignore_glob nor pytest_ignore_collect is consulted for
+    # it.  The conftest keeps collect_ignore_glob for a plain
+    # `pytest tests/aio` invocation; this covers the isolated runner.
+    if SUITE == "aio" and sys.version_info < (3, 14) and files:
+        print("== runloom isolated suite: SKIPPING tests/aio -- bodies are "
+              "pinned from CPython 3.14 and this is {0}.{1} "
+              "({2} file(s) skipped) ==".format(
+                  sys.version_info[0], sys.version_info[1], len(files)))
+        return 0
+
     parallel = [f for f in files if f not in SERIAL_FILES]
     serial   = [f for f in files if f in SERIAL_FILES]
     jobs = min(jobs, len(parallel)) or 1
