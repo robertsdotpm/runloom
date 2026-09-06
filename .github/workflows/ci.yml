@@ -32,6 +32,12 @@ on:
         description: "CPython versions to build (major.minor.patch, space/comma separated). Blank = repo default."
         required: false
         default: ""
+      suite:
+        description: "Test depth. Blank = the event default (full on the weekly, cheap otherwise). 'full' runs scripts/check_all_fast.sh -- the only way to request the full gate by hand; without it the weekly schedule was the sole path to it, so a fix to a phase the cheap subset skips could not be verified until the next Sunday."
+        required: false
+        default: ""
+        type: choice
+        options: ["", "cheap", "full"]
   pull_request:
   push:
     branches: [main]
@@ -259,8 +265,9 @@ jobs:
         uses: ./.github/actions/runloom-tests
         with:
           version: ${{ matrix.version }}
-          # cheap on every push/PR; the full check_all_fast only on the weekly.
-          suite: ${{ github.event_name == 'schedule' && 'full' || 'cheap' }}
+          # cheap on every push/PR; the full check_all_fast on the weekly, or
+          # on demand via the workflow_dispatch `suite` input (empty = default).
+          suite: ${{ github.event.inputs.suite || (github.event_name == 'schedule' && 'full' || 'cheap') }}
 
       # Package for release only on a push to a release branch that actually
       # built a fresh interpreter.
