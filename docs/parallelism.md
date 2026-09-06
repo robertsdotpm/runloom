@@ -181,6 +181,61 @@ sends to, you'll see scaling fall off.  Mitigations:
 - Use atomic counters or per-hub thread-local accumulators when the
   data doesn't need ordering.
 
+### Ctrl-C does not interrupt a hub fiber
+
+This is only about **signals** -- Ctrl-C, `SIGALRM`, anything arriving from
+outside your program at a moment nobody chose. Exceptions your own code raises
+are unaffected: `try`/`except`/`finally` work inside a fiber exactly as they do
+anywhere else, under every scheduler.
+
+The question is where a Ctrl-C lands:
+
+```python
+def worker():
+    try:
+        conn.recv(4096)          # blocked here, and someone hits Ctrl-C
+    except KeyboardInterrupt:
+        cleanup()                # <-- does this run?
+```
+
+* `runloom.run(1, ...)` -- **yes.** The interrupt comes out of `recv()` in this
+  fiber, the same way it would out of a plain blocking `recv()` in a normal
+  Python program, and `cleanup()` runs.
+* `runloom.run(4, ...)` -- **no.** The `KeyboardInterrupt` is raised out of
+  `runloom.run(...)` itself. `cleanup()` never runs, and the fiber stays parked
+  until the hubs are stopped.
+
+So under M:N, **do not rely on an `except KeyboardInterrupt:` or a `finally:`
+inside a fiber to release anything on Ctrl-C.** Release it from outside the
+fiber, or use `runloom.run(1, ...)` if you need that guarantee.
+
+Nothing is silently swallowed either way -- under M:N the interrupt reliably
+comes out of `run()`, which is also what plain `asyncio` does. It is a missing
+capability, not a bug.
+
+#### Why it works on one scheduler and not the other
+
+Skip this unless you are changing the scheduler.
+
+When a signal handler raises, the exception is created *wherever the handler
+runs* -- and CPython runs handlers on the main thread, at whatever bytecode
+boundary comes next, which is not necessarily the fiber that should receive it.
+So the scheduler has to pick a recipient BEFORE running the handler, and then
+hand the resulting exception to that fiber to raise on its own stack. Picking
+afterwards is not possible: the exception is already on the wrong stack and
+moving it destroys it.
+
+The single-thread scheduler can do this for three kinds of blocked fiber: one
+parked on an fd (`recv`, `accept`, ...), one waiting on an io_uring completion,
+and one inside a `select.poll` reprobe loop. Each is found through the calling
+scheduler's own bookkeeping.
+
+Under M:N a hub fiber's bookkeeping belongs to *its hub's* scheduler, so the
+main thread cannot see any of the three, and `mn_run` falls back to carrying the
+exception out. Fixing that means sharing the signal state across threads and
+raising into a fiber attached to another hub -- in the same code path that
+coordinates stop-the-world pauses. It has not been needed yet.
+
 ### Goroutine routing back to origin hub
 
 If fiber A on hub 1 parks for I/O, and the I/O wake fires while

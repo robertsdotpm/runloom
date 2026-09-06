@@ -1680,6 +1680,29 @@ Py_ssize_t runloom_mn_run(void)
              * main sched, so runloom_netpoll_signal_wake (keyed on the caller's
              * sched) finds none eligible from here -- the documented
              * no-eligible-parker fallback is exactly "carry it out of run()".
+             *
+             * THIS IS THE M:N SIGNAL GAP, and it is worth stating plainly
+             * because the single-thread plane no longer behaves this way.
+             * There, a raised handler is delivered INTO the fiber sitting in a
+             * cooperative blocking call, so its own try/except sees it (see the
+             * probe in runloom_sched_drain.c.inc).  Three classes of recipient
+             * can be served -- a netpoll parker, an io_uring completion waiter,
+             * and a sched_sleep_io reprobe sleeper -- and ALL THREE ARE KEYED
+             * ON THE CALLING SCHED, so none is reachable from here.  Under M:N
+             * no hub fiber is ever interrupted: an `except KeyboardInterrupt:`
+             * or a `finally:` inside a hub fiber does not run on Ctrl-C.
+             *
+             * That is a MISSING CAPABILITY, NOT A BUG: delivery out of mn_run
+             * is reliable, loses nothing, and matches stock asyncio.  Closing
+             * it means making the signal stash cross-thread (s->signal_exc and
+             * s->signal_target are thread-confined and non-atomic today, which
+             * is a precondition the single-thread design relies on) and
+             * restoring an exception into a tstate attached to another hub --
+             * in this same path that already coordinates stop-the-world and
+             * per-g tstate attachment.  Nothing has needed it yet.  If you take
+             * it on, WRITE THE FAILING TEST FIRST: three attempts at the
+             * single-thread half were reverted for changing signal code without
+             * a reproducer.  docs/parallelism.md has the user-facing version.
              * The still-running hubs are stopped by the caller's mn_fini, the
              * same as the RUNLOOM_DEADLOCK=raise early-return path below. */
             if ((++sigpoll & 0xfu) == 0) {

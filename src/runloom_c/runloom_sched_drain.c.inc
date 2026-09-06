@@ -426,6 +426,12 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
              * Measured on macOS: in EVERY failing run signal_wake was never
              * even called (no [sigwake] line), 13/100 of runs.
              *
+             * SINGLE-THREAD PLANE ONLY.  All three recipient classes here are
+             * keyed on the CALLING sched, and a hub fiber's parker belongs to
+             * its hub's sched -- so under M:N none is eligible and mn_run's own
+             * sigpoll carries the exception out instead.  See the note at
+             * mn_sched_init_fini.c.inc's sigpoll block, and docs/parallelism.md.
+             *
              * s->netpoll_parked is the per-sched count of exactly the parkers
              * runloom_netpoll_signal_wake walks (it filters on
              * p->g->owner == owner), and it is already loaded two lines above
