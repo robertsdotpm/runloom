@@ -706,10 +706,21 @@ void runloom_sched_wake_safe(runloom_g_t *g)
  * a credit behind that silently satisfies that g's NEXT, unrelated park.  The
  * contract every consumer must therefore honour is: park_safe returning is NOT
  * proof your condition holds -- re-check the predicate and re-park.  Every
- * consumer in-tree does (runloom_blocking_call, runloom_park_until, the
- * io_uring waits, and the aio task driver since 6a733b74), but that was learned
- * the hard way: the driver did not, and the resulting strand needed CPU
- * contention to reproduce at all.
+ * consumer in-tree does (runloom_blocking_call, the io_uring waits, and the aio
+ * task driver since 6a733b74), but that was learned the hard way: the driver
+ * did not, and the resulting strand needed CPU contention to reproduce at all.
+ *
+ * runloom_park_until USED to be on that list and no longer belongs there: it
+ * has no callers.  It is the unified predicate-park entry added by 367055b2
+ * (item 1 increment 1) that primitives were to migrate onto one at a time;
+ * 82dc67c0 migrated the blockpool hub wait onto it, and 6a733b74 -- fixing the
+ * stranded-wake-credit bug above -- took it back off.  So the migration is
+ * PAUSED with zero adopters, not finished.  It was cited here as evidence the
+ * contract is honoured in-tree, which made this note self-certifying: a
+ * function nobody calls proves nothing.  tools/verify/uncalled_lint.py now
+ * catches that shape; runloom_park_until is listed there under TRIAGE, and the
+ * open decision is to resume the migration (with the credit fix inside) or
+ * delete it.
  *
  * Arming this turns "win a race under load" into "run the suite with a flag":
  * any consumer that treats a return as proof breaks immediately and loudly.

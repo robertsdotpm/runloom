@@ -78,7 +78,13 @@ ALLOWED = {
     # callers at all.  Whatever it was meant to serve is being served by
     # something else, and the fault-injection knob has one fewer consumer than
     # its documentation claims.
-    "runloom_park_until":           "TRIAGE: uncalled; named as a live park_safe consumer",
+    # Orphaned MID-MIGRATION, not accidental: 367055b2 added it as the unified
+    # predicate-park entry, 82dc67c0 moved the blockpool onto it, and 6a733b74
+    # moved the blockpool back off while fixing a stranded wake credit -- taking
+    # its only adopter with it.  Decision needed: resume the migration (with that
+    # credit fix inside) or delete it.  The stale claim that it was a live
+    # park_safe consumer has been removed from runloom_sched_parkwake.c.inc.
+    "runloom_park_until":           "TRIAGE: migration paused, zero adopters since 6a733b74",
     "runloom_coro_init_at":         "TRIAGE: uncalled; placement-new coro ctor",
     "runloom_coro_arena_stack":     "TRIAGE: uncalled; arena stack allocator",
 }
