@@ -148,10 +148,23 @@ int runloom_netpoll_drain_parked(void)
  * fallback).  Called only from the scheduler grab, which has already verified
  * (via PyErr_CheckSignals) that a handler actually raised -- so a fiber is
  * never woken spuriously (an EINTR with no pending Python signal wakes no one). */
+/* RUNLOOM_DEBUG_SIGWAKE=1: report what the signal walk saw.  BEHAVIOUR-NEUTRAL
+ * (counters and prints only).  Re-added after the reverted fix attempts because
+ * the two callers this must serve -- a wait_fd parker and the CoPoll selector,
+ * which may have no parker at all -- have to be told apart by measurement. */
+static int runloom_sigwake_dbg(void)
+{
+    static int c = -1;
+    if (c < 0) { const char *e = getenv("RUNLOOM_DEBUG_SIGWAKE"); c = (e && *e && *e != '0'); }
+    return c;
+}
+
 int runloom_netpoll_signal_wake(void)
 {
     runloom_sched_t *owner = runloom_sched_get();
     int pi;
+    int dbg = runloom_sigwake_dbg();
+    int seen = 0, armed = 0, woken = 0, parked = 0, wrong_owner = 0;
     for (pi = 0; pi < RUNLOOM_PARKER_POOL_MAX; pi++) {
         runloom_parker_pool_t *pool = &runloom_pools[pi];
         runloom_parked_t *p;
@@ -159,7 +172,15 @@ int runloom_netpoll_signal_wake(void)
         RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
         for (p = pool->head; p != NULL; p = p->next) {
             int cur;
-            if (p->g == NULL || p->g->owner != owner) continue;
+            if (p->g == NULL) continue;
+            if (p->g->owner != owner) { wrong_owner++; continue; }
+            seen++;
+            if (dbg) {
+                int st = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
+                if (st == RUNLOOM_PARK_PARKED) parked++;
+                else if (st == RUNLOOM_PARK_WOKEN) woken++;
+                else armed++;
+            }
             /* Claim via the same commit CAS the pump/timeout/cancel use, so
              * exactly one waker wins this parker. */
             for (;;) {
@@ -177,6 +198,9 @@ int runloom_netpoll_signal_wake(void)
              * g hasn't yielded (still running on its own thread) and a WOKEN one
              * was just claimed by another waker -- skip both, try the next. */
             if (cur != RUNLOOM_PARK_PARKED) continue;
+            if (dbg)
+                fprintf(stderr, "[sigwake] WOKE fd=%d events=%d | seen=%d parked=%d armed=%d woken=%d\n",
+                        p->fd, p->events, seen, parked, armed, woken);
             if (p->ready_out != NULL) *p->ready_out = RUNLOOM_NETPOLL_SIGNALED;
             runloom_parker_unlink(pool, p);
             if (p->hub != NULL) runloom_mn_wake_g(p->hub, p->g);
@@ -186,6 +210,9 @@ int runloom_netpoll_signal_wake(void)
         }
         RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     }
+    if (dbg)
+        fprintf(stderr, "[sigwake] NONE | seen=%d parked=%d armed=%d woken=%d wrong_owner=%d\n",
+                seen, parked, armed, woken, wrong_owner);
     return 0;
 }
 
