@@ -407,7 +407,43 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
              * such parker exists (genuinely idle / sleep-only) does the scheduler
              * carry the raised exception out of run_forever()/run_until_complete,
              * as stock asyncio does for Ctrl-C. */
-            if (runloom_sched_ready_empty(s) && PyErr_CheckSignals() < 0) {
+            /* PROBE WHEN WE CAN DELIVER, OR WHEN NOBODY ELSE CAN.
+             *
+             * Two comments in this function give opposite rationales, and the
+             * tension between them IS bug 3.  Above: "the scheduler must WIN
+             * the race to catch the signal (whichever fiber's eval loop catches
+             * it first would just swallow it -> hang)".  Below: "a due sleeper
+             * runs Python next and its own eval loop delivers any pending
+             * signal in-context -- so only probe when the ready ring is empty".
+             * Each is right in its own regime, and the code only implemented
+             * the second.
+             *
+             * `ready_empty` was standing in for "will some fiber collect this
+             * itself?", but a fiber PARKED in a cooperative call is not in the
+             * ready ring at all -- it is invisible to that test.  So one
+             * unrelated sleeper coming due suppressed the probe entirely and
+             * then ate the interrupt meant for a fiber parked in send_all.
+             * Measured on macOS: in EVERY failing run signal_wake was never
+             * even called (no [sigwake] line), 13/100 of runs.
+             *
+             * s->netpoll_parked is the per-sched count of exactly the parkers
+             * runloom_netpoll_signal_wake walks (it filters on
+             * p->g->owner == owner), and it is already loaded two lines above
+             * to decide whether to poll -- so this asks "is there someone I can
+             * hand it to?" for one relaxed atomic load, on the idle path.
+             *
+             * Why not simply always probe (f0dc8edb): PyErr_CheckSignals RUNS
+             * the handler, so probing when we cannot deliver strands the
+             * exception on the SCHEDULER's tstate, and the resume path's snap
+             * dance then carries it away from the fiber that should have had
+             * it.  That is why select.poll's wrapper -- CoPoll, which has no
+             * backing fd, registers NO parker, and reprobes on a short
+             * sched_sleep -- lost its own signal, failing the verbatim CPython
+             * test_select_interrupt_exc 5 runs out of 5.  NEVER FETCH A SIGNAL
+             * YOU CANNOT DELIVER is the invariant; ready_empty keeps the
+             * no-parker case behaving exactly as it does today. */
+            if ((__atomic_load_n(&s->netpoll_parked, __ATOMIC_ACQUIRE) > 0 ||
+                 runloom_sched_ready_empty(s)) && PyErr_CheckSignals() < 0) {
                 PyErr_Fetch(&sig_t, &sig_v, &sig_b);
                 PyErr_NormalizeException(&sig_t, &sig_v, &sig_b);
                 if (sig_v != NULL && sig_b != NULL)
