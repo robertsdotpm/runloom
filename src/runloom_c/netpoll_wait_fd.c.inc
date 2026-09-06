@@ -148,23 +148,10 @@ int runloom_netpoll_drain_parked(void)
  * fallback).  Called only from the scheduler grab, which has already verified
  * (via PyErr_CheckSignals) that a handler actually raised -- so a fiber is
  * never woken spuriously (an EINTR with no pending Python signal wakes no one). */
-/* RUNLOOM_DEBUG_SIGWAKE=1: report what the signal walk saw.  Costs one getenv
- * per call when unset, and exists because three successive guesses at why the
- * walk misses the send_all parker were all wrong -- the walk should say what it
- * saw rather than be reasoned about. */
-static int runloom_sigwake_dbg(void)
-{
-    static int c = -1;
-    if (c < 0) { const char *e = getenv("RUNLOOM_DEBUG_SIGWAKE"); c = (e && *e && *e != '0'); }
-    return c;
-}
-
 int runloom_netpoll_signal_wake(void)
 {
     runloom_sched_t *owner = runloom_sched_get();
     int pi;
-    int dbg = runloom_sigwake_dbg();
-    int seen = 0, wrong_owner = 0, null_g = 0, not_parked = 0;
     for (pi = 0; pi < RUNLOOM_PARKER_POOL_MAX; pi++) {
         runloom_parker_pool_t *pool = &runloom_pools[pi];
         runloom_parked_t *p;
@@ -172,35 +159,16 @@ int runloom_netpoll_signal_wake(void)
         RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
         for (p = pool->head; p != NULL; p = p->next) {
             int cur;
-            seen++;
-            if (p->g == NULL) { null_g++; continue; }
-            if (p->g->owner != owner) { wrong_owner++; continue; }
+            if (p->g == NULL || p->g->owner != owner) continue;
             /* Claim via the same commit CAS the pump/timeout/cancel use, so
-             * exactly one waker wins this parker.
-             *
-             * CLAIM ONLY A PARKED PARKER.  This loop used to CAS whatever it
-             * found -- including an ARMED parker, a g that has registered but
-             * not yet yielded -- and only afterwards notice, via the
-             * `cur != PARKED` test below, that it did not want it.  By then the
-             * damage was done: commit was already WOKEN, so the parker had been
-             * consumed by a waker that then walked away without waking anything.
-             * The g went on to park against a parker nobody would ever claim
-             * again, and the signal it was supposed to receive was simply lost.
-             *
-             * That is the macOS test_signal_interrupts_parked_io hang: the
-             * client caught mid-registration in send_all had its parker burned
-             * by the signal walk, the exception fell through to an unrelated
-             * sleeper, and the client stayed parked until the faulthandler
-             * timeout.  The comment below always said ARMED should be skipped;
-             * the code claimed it first and skipped second. */
+             * exactly one waker wins this parker. */
             for (;;) {
                 cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
-                if (cur != RUNLOOM_PARK_PARKED) break;   /* not ours to claim */
+                if (cur == RUNLOOM_PARK_WOKEN) break;
                 if (__atomic_compare_exchange_n(&p->commit, &cur, RUNLOOM_PARK_WOKEN,
                                                 0, __ATOMIC_ACQ_REL,
                                                 __ATOMIC_ACQUIRE)) {
                     RUNLOOM_PARK_NOTE(cur, RUNLOOM_PARK_WOKEN);
-                    cur = RUNLOOM_PARK_PARKED;   /* we won it while PARKED */
                     break;
                 }
             }
@@ -208,10 +176,7 @@ int runloom_netpoll_signal_wake(void)
              * will resume in wait_fd to pick up the stashed exception.  An ARMED
              * g hasn't yielded (still running on its own thread) and a WOKEN one
              * was just claimed by another waker -- skip both, try the next. */
-            if (cur != RUNLOOM_PARK_PARKED) { not_parked++; continue; }
-            if (dbg)
-                fprintf(stderr, "[sigwake] WOKE parker fd=%d events=%d after seen=%d\n",
-                        p->fd, p->events, seen);
+            if (cur != RUNLOOM_PARK_PARKED) continue;
             if (p->ready_out != NULL) *p->ready_out = RUNLOOM_NETPOLL_SIGNALED;
             runloom_parker_unlink(pool, p);
             if (p->hub != NULL) runloom_mn_wake_g(p->hub, p->g);
@@ -221,9 +186,6 @@ int runloom_netpoll_signal_wake(void)
         }
         RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     }
-    if (dbg)
-        fprintf(stderr, "[sigwake] NO PARKER: seen=%d null_g=%d wrong_owner=%d not_parked=%d\n",
-                seen, null_g, wrong_owner, not_parked);
     return 0;
 }
 
@@ -247,25 +209,6 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
      * POSIX select backend additionally cannot represent an fd >= FD_SETSIZE in
      * an fd_set, so reject those too (epoll/kqueue handle high fds fine). */
     if (fd < 0) { errno = EBADF; return -1; }
-
-    /* DEFERRED SIGNAL DELIVERY.  A signal raised while NO parker existed is
-     * stashed on the scheduler (runloom_sched_drain) rather than handed to
-     * whatever else happened to be runnable.  The first fiber to reach a
-     * cooperative park takes it here -- which is the fiber that was about to
-     * block, i.e. exactly the one a real recv()/send() would have been
-     * interrupted in.  Mirrors the RUNLOOM_NETPOLL_SIGNALED resume path below. */
-    {
-        runloom_sched_t *sw = runloom_sched_get();
-        if (sw != NULL && sw->signal_exc != NULL) {
-            PyObject *exc = sw->signal_exc;
-            PyObject *tb;
-            sw->signal_exc = NULL;
-            sw->signal_defer = 0;
-            tb = PyException_GetTraceback(exc);          /* new ref or NULL */
-            PyErr_Restore((PyObject *)Py_NewRef(Py_TYPE(exc)), exc, tb);
-            return -1;
-        }
-    }
 
     /* Native mn-sim gates (MN_SIM_DST_PLAN.md I2, gate [11]).  With the pump
      * no-op'd under the armed controlled scheduler, the census-dispatched sim

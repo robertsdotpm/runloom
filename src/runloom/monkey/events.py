@@ -41,29 +41,60 @@ class CoEvent(object):
     def __init__(self):
         self._flag    = False
         self._waiters = collections.deque()
-        self._guard   = _real_allocate_lock()
+        self._guard   = runloom_c.Mutex()      # used SPIN-ONLY (try_lock)
+
+    # --- spin-only guard: never blocks the OS thread ---------------------
+    # _guard used to be a real OS lock taken with a BLOCKING acquire.  A real
+    # lock blocks the THREAD, and runloom multiplexes fibers onto hub threads,
+    # so: fiber A takes the guard, is preempted while holding it, fiber B on the
+    # SAME hub thread blocks that thread acquiring it, and A -- which can only
+    # resume on that thread -- never runs again to release it.  Self-deadlock.
+    # Proven by instrumenting the guard: at the hang the recorded owner thread
+    # was itself blocked in acquire(), i.e. holder == blocker.
+    #
+    # This is the hazard _Parker._pool_lock already documents ("blocking would
+    # freeze the fiber's hub if sysmon preempted the holder") and that
+    # CoFMutex._glock already solves.  Same treatment here: try_lock, and on
+    # contention YIELD THE FIBER (so the O(1) holder can be rescheduled) rather
+    # than block the thread.  A foreign thread has no hub to freeze, so it does
+    # a brief real sleep instead.
+    def _glock(self):
+        if self._guard.try_lock():
+            return
+        if runloom_c.current_g() is not None:
+            while not self._guard.try_lock():
+                runloom_c.sched_yield()
+        else:
+            while not self._guard.try_lock():
+                _raw_time_sleep(0.0001)
+
+    def _gunlock(self):
+        self._guard.unlock()
 
     def is_set(self):
         return self._flag
     isSet = is_set
 
     def set(self):
-        self._guard.acquire()
+        self._glock()
         if self._flag:
-            self._guard.release()
+            self._gunlock()
             return
         self._flag = True
         waiters, self._waiters = list(self._waiters), collections.deque()
-        self._guard.release()
+        self._gunlock()
         _unpark_all(waiters)   # batched direct wake (no os.write per waiter)
 
     def clear(self):
-        with self._guard:
+        self._glock()
+        try:
             self._flag = False
+        finally:
+            self._gunlock()
 
     def _at_fork_reinit(self):
         # The flag survives a fork; the parent's parked waiters do not.
-        self._guard = _real_allocate_lock()
+        self._guard = runloom_c.Mutex()        # spin-only; see _glock
         self._waiters.clear()
 
     def wait(self, timeout=None):
@@ -82,14 +113,14 @@ class CoEvent(object):
         # the scheduler's timer heap (still 0 fds, no waker fiber).  (We are
         # past the foreign-thread guard above, so this is always a fiber.)
         p = _Parker(inmem=True)
-        self._guard.acquire()
+        self._glock()
         if self._flag:
             # set() fired while we were building the parker.
-            self._guard.release()
+            self._gunlock()
             p.release()
             return True
         self._waiters.append(p)
-        self._guard.release()
+        self._gunlock()
         # set() unparks us, OR the deadline fires inside the netpoll wait -- no
         # waker fiber + heap timer per timed wait (see _Parker.park).  self._flag
         # is authoritative -- so RE-PARK on a spurious/raced wake instead of
@@ -112,9 +143,12 @@ class CoEvent(object):
                 # spurious (parker still queued).  Under the guard + _flag re-check
                 # so a set() racing here is not missed.
                 if not self._flag:
-                    with self._guard:
+                    self._glock()
+                    try:
                         if not self._flag and p not in self._waiters:
                             self._waiters.append(p)
+                    finally:
+                        self._gunlock()
         else:
             deadline = time.monotonic() + timeout
             while not self._flag:
@@ -127,17 +161,23 @@ class CoEvent(object):
                 # or a later set() cannot wake us (the timed wait would then return
                 # a spurious False at the deadline).
                 if not self._flag:
-                    with self._guard:
+                    self._glock()
+                    try:
                         if not self._flag and p not in self._waiters:
                             self._waiters.append(p)
+                    finally:
+                        self._gunlock()
         # Remove our parker so a later set() never unparks this (now pooled/reused)
         # parker -> spurious wake.  Under the guard so it is serialized with set()'s
         # snapshot; a no-op (ValueError) if set() already claimed us.
-        with self._guard:
+        self._glock()
+        try:
             try:
                 self._waiters.remove(p)
             except ValueError:
                 pass
+        finally:
+            self._gunlock()
         p.release()
         return self._flag
 

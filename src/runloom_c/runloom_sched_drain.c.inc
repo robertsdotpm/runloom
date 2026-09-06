@@ -1,4 +1,3 @@
-#define RUNLOOM_SIGNAL_DEFER_MAX 512
 /* Part of runloom_sched.c -- #included into that translation unit, not compiled
  * standalone.  See runloom_sched.c for the includes/typedefs/file-scope state
  * these definitions depend on. */
@@ -408,26 +407,7 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
              * such parker exists (genuinely idle / sleep-only) does the scheduler
              * carry the raised exception out of run_forever()/run_until_complete,
              * as stock asyncio does for Ctrl-C. */
-            /* PARKERS GET FIRST REFUSAL, even when a fiber was just re-queued.
-             *
-             * This used to be gated on `runloom_sched_ready_empty(s) &&`, so any
-             * fiber re-queued in this iteration -- an expired sleeper with no
-             * connection to the signal -- suppressed the probe entirely and then
-             * collected the KeyboardInterrupt in its own eval loop.  That is the
-             * macOS `test_signal_interrupts_parked_io` failure: with the client
-             * parked in send_all and the observer's sched_sleep expiring in the
-             * same iteration, the observer was re-queued, the probe was skipped,
-             * and the interrupt surfaced as "Exception ignored in: <function
-             * server>" while the fiber under test stayed parked forever.
-             *
-             * The shortcut is still honoured where it is actually correct: if a
-             * handler raised but NO wait_fd parker is eligible, the exception is
-             * RESTORED and the re-queued fiber's own eval loop delivers it, which
-             * is the CoPoll contract (select.poll has no backing fd, so it parks
-             * on a short sched_sleep and must receive its own signal).  So the
-             * only behaviour that changes is the one that was wrong: a parked
-             * cooperative recv/send_all now outranks an unrelated sleeper. */
-            if (PyErr_CheckSignals() < 0) {
+            if (runloom_sched_ready_empty(s) && PyErr_CheckSignals() < 0) {
                 PyErr_Fetch(&sig_t, &sig_v, &sig_b);
                 PyErr_NormalizeException(&sig_t, &sig_v, &sig_b);
                 if (sig_v != NULL && sig_b != NULL)
@@ -444,39 +424,7 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
                         sig_t = sig_v = sig_b = NULL;
                         continue;   /* the woken parker raises it in its own stack */
                     }
-                    /* NO PARKER EXISTS YET -- defer, do not hand it away.
-                     *
-                     * Measured (RUNLOOM_DEBUG_SIGWAKE, macOS): in the failing
-                     * window the walk sees ZERO parkers -- the fiber that is
-                     * about to block has not linked one yet.  Handing the
-                     * exception to whatever else happened to be runnable killed
-                     * an unrelated sleeper and left the real blocker parked
-                     * forever.  Keep it stashed instead; wait_fd gives it to the
-                     * first fiber that reaches a cooperative park, which is the
-                     * fiber a real recv()/send() would have been interrupted in.
-                     *
-                     * BOUNDED: a workload that never parks on an fd (CoPoll
-                     * busy-polls select.poll on sched_sleep, no backing fd)
-                     * would otherwise hold the signal forever, so after
-                     * RUNLOOM_SIGNAL_DEFER_MAX scheduler iterations fall back to
-                     * the previous behaviour and let the next runnable fiber's
-                     * eval loop take it. */
-                    if (!runloom_sched_ready_empty(s) &&
-                        s->signal_defer < RUNLOOM_SIGNAL_DEFER_MAX) {
-                        s->signal_defer++;
-                        Py_XDECREF(sig_t); Py_XDECREF(sig_b);
-                        sig_t = sig_v = sig_b = NULL;   /* owned by signal_exc */
-                        continue;
-                    }
-                    s->signal_exc = NULL;
-                    s->signal_defer = 0;
-                }
-                if (!runloom_sched_ready_empty(s)) {
-                    /* Deferral exhausted (or already held): put it back so a
-                     * runnable fiber's eval loop raises it -- the CoPoll path. */
-                    PyErr_Restore(sig_t, sig_v, sig_b);
-                    sig_t = sig_v = sig_b = NULL;
-                    continue;
+                    s->signal_exc = NULL;   /* no parker; carry it out of run() */
                 }
                 sig_break = 1;
                 break;

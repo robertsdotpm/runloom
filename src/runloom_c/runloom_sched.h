@@ -595,11 +595,6 @@ struct runloom_sched {
      * + cleared) by runloom_netpoll_wait_fd when it resumes on the
      * RUNLOOM_NETPOLL_SIGNALED sentinel.  Owned ref while set; NULL otherwise. */
     PyObject *signal_exc;
-    /* Iterations a raised signal has been held waiting for a wait_fd parker to
-     * appear (deferred delivery -- see runloom_sched_drain).  Bounded so a
-     * workload that never parks on an fd (CoPoll busy-polls on sched_sleep)
-     * still gets its signal instead of it being stashed forever. */
-    int signal_defer;
     /* Count of THIS sched's fibers currently parked in netpoll (non-hub
      * parkers whose g->owner == this sched).  Bumped in runloom_parker_link /
      * unlink.  The drain loop uses this -- NOT the global parked count -- so a
