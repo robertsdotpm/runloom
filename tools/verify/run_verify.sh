@@ -139,6 +139,20 @@ if have python3; then
             fail=$((fail + 1)); FAILED="$FAILED fd_chokepoint"
         fi
     fi
+    # uncalled: a non-static runloom_* function with no callers.  Not merely
+    # dead code -- the path it belongs to is unreachable, so nothing tests it
+    # and it rots silently.  runloom_iouring_signal_wake sat like that with a
+    # comment claiming the drain called it; the delivery it was meant to
+    # perform had never happened, and its consumer had rotted too.
+    if [ -f "$HERE/uncalled_lint.py" ]; then
+        printf '  [lint] %-28s ' "uncalled"
+        if python3 "$HERE/uncalled_lint.py" >"/tmp/runloom_uncalled.log" 2>&1; then
+            echo "OK"; pass=$((pass + 1))
+        else
+            echo "UNCALLED-FUNCTION (see /tmp/runloom_uncalled.log)"
+            fail=$((fail + 1)); FAILED="$FAILED uncalled"
+        fi
+    fi
     # tstate manifest: every PyThreadState field must have a decided disposition
     # so a new CPython field can't slip in unclassified (item 15).  SKIPs if
     # libclang is absent (returns 0 with a SKIP line).
