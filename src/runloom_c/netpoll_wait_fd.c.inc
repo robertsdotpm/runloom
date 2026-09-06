@@ -159,6 +159,95 @@ static int runloom_sigwake_dbg(void)
     return c;
 }
 
+/* ---- test-only: force the signal collection into the ARMED window -------
+ *
+ * RUNLOOM_FAULT_SIGWAKE_AT_ARM=N (inert unless set): on the Nth reach of the
+ * site below -- parker linked and registered, commit still ARMED -- raise a
+ * SIGALRM and collect it RIGHT THERE, running the scheduler's own delivery
+ * block at that point instead of at the scheduler's poll.
+ *
+ * The drain cannot currently reach that instant on its own (see the
+ * reachability note in runloom_netpoll_signal_wake), which is exactly why the
+ * knob has to manufacture it: the ARMED half of the walk is otherwise
+ * untestable, and it was argued about across three fix attempts at 10-30
+ * minutes per data point without ever being executed.  Pinning the collection
+ * to the ARMED point runs that branch every time, on every platform, in under
+ * a second -- an assertion rather than a rate to compare against a baseline.
+ *
+ * The sequence below is the drain's verbatim (raise -> collect -> stash ->
+ * signal_wake -> restore on refusal), so what runs is the real delivery path,
+ * not a mock of it.  The only synthetic part is WHEN the signal arrives, which
+ * is precisely the variable under test.  raise() immediately followed by
+ * PyErr_CheckSignals() with no bytecode in between is what puts the handler's
+ * exception here rather than at the caller's next check point.
+ *
+ * Main thread only, by construction: PyErr_CheckSignals runs Python handlers
+ * only there, so on an mn hub the site is a no-op and the knob stays inert.
+ *
+ * A test that arms this MUST install a Python SIGALRM handler first.  Without
+ * one the raise() takes SIGALRM's default disposition and kills the process --
+ * loudly, and only ever in a run that opted in by setting the variable. */
+#include <signal.h>
+#if defined(SIGALRM)
+
+static int runloom_sigwake_at_arm_nth(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_FAULT_SIGWAKE_AT_ARM");
+        cur = (e != NULL && e[0] != '\0') ? atoi(e) : 0;
+        if (cur < 0) cur = 0;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
+/* Exactly once, on the Nth armed reach -- not 1-in-N.  A wait_fd that keeps
+ * re-parking (send_all against a peer that never reads) would otherwise take a
+ * fresh interrupt on every lap and never let the fix's delivery be observed. */
+static int runloom_sigwake_at_arm_hit(void)
+{
+    static unsigned long n;
+    int nth = runloom_sigwake_at_arm_nth();
+    if (nth == 0) return 0;
+    return __atomic_add_fetch(&n, 1UL, __ATOMIC_RELAXED) == (unsigned long)nth;
+}
+
+static void runloom_sigwake_at_arm_inject(runloom_g_t *current_g,
+                                          runloom_sched_t *s)
+{
+    runloom_sched_t *own = (current_g != NULL && current_g->owner != NULL)
+                           ? current_g->owner : s;
+    PyObject *t = NULL, *v = NULL, *b = NULL;
+    raise(SIGALRM);
+    if (PyErr_CheckSignals() >= 0) {
+        /* No Python handler, or one that did not raise: nothing to deliver.
+         * The caller parks as usual, so the knob is a no-op rather than a
+         * behaviour change, and a suite that happens to set it sees nothing. */
+        fprintf(stderr, "[sigwake-fault] ARM site: no handler raised\n");
+        return;
+    }
+    PyErr_Fetch(&t, &v, &b);
+    PyErr_NormalizeException(&t, &v, &b);
+    if (v != NULL && b != NULL) PyException_SetTraceback(v, b);
+    if (own != NULL && own->signal_exc == NULL && v != NULL) {
+        own->signal_exc = v;                      /* steals Fetch's ref */
+        if (runloom_netpoll_signal_wake()) {
+            Py_XDECREF(t); Py_XDECREF(b);
+            fprintf(stderr, "[sigwake-fault] ARM site: signal_wake CLAIMED a parker\n");
+            return;
+        }
+        own->signal_exc = NULL;
+    }
+    /* Refused: the drain would carry it out of run().  Restoring it here puts
+     * it on the fiber that is mid-park, which is the nearest analogue -- and
+     * either way the test sees "not delivered through the parked call". */
+    fprintf(stderr, "[sigwake-fault] ARM site: signal_wake found NO parker\n");
+    PyErr_Restore(t, v, b);
+}
+#endif  /* SIGALRM */
+
 int runloom_netpoll_signal_wake(void)
 {
     runloom_sched_t *owner = runloom_sched_get();
@@ -193,18 +282,59 @@ int runloom_netpoll_signal_wake(void)
                     break;
                 }
             }
-            /* Only a committed (PARKED) g is re-queued here: it has yielded and
-             * will resume in wait_fd to pick up the stashed exception.  An ARMED
-             * g hasn't yielded (still running on its own thread) and a WOKEN one
-             * was just claimed by another waker -- skip both, try the next. */
-            if (cur != RUNLOOM_PARK_PARKED) continue;
+            /* WOKEN means another waker already owns this parker -- leave it
+             * alone.  PARKED and ARMED are BOTH ours to deliver to; the only
+             * difference is whether the g needs re-queuing.
+             *
+             * This used to be `if (cur != RUNLOOM_PARK_PARKED) continue;`,
+             * which claimed an ARMED parker (the CAS above is unconditional)
+             * and then abandoned it: nobody delivered, the g's own commit CAS
+             * failed against the WOKEN we just wrote, and it took the abort
+             * path below with the exception dangling -- swallowed as
+             * "Exception ignored in: <function ...>", the fiber parked forever.
+             *
+             * HOW REACHABLE IS THAT TODAY: not, as far as I can measure, and
+             * the comment should not pretend otherwise.  signal_wake runs only
+             * from runloom_sched_drain, keyed on the CALLER's sched, and:
+             *   - on the H=1 plane the drain runs only when no fiber of that
+             *     sched is running, so every parker it walks has yielded and is
+             *     PARKED (measured: 40/40 real runs on epoll report
+             *     `armed=0`, and the macOS traces in .check-logs say the same);
+             *   - under M:N a hub fiber's parker is owned by the HUB's sched,
+             *     so the main thread's walk filters it out as wrong_owner --
+             *     see the note at mn_sched_init_fini.c.inc's sigpoll block.
+             * So this branch is latent.  It is still wrong: the claim CAS above
+             * is unconditional, so the first caller or ownership change that
+             * does walk an ARMED parker silently eats a signal, and the abort
+             * path used to hand the raw sentinel back to recv/send_all/connect.
+             * RUNLOOM_FAULT_SIGWAKE_AT_ARM=1 reaches it deliberately, which is
+             * what tests/test_signal_armed_parker.py asserts against.
+             *
+             * Skipping an ARMED parker instead of burning it was tried
+             * (6b378681) and reverted with "the claim is load-bearing -- burning
+             * it is how the CoPoll selector path gets served".  That
+             * attribution is WRONG, and measurably so: the four-leg CI failure
+             * is reproduced by f0dc8edb ALONE -- restore just its drain hunk and
+             * test_select_interrupt_exc fails `InterruptSelect not raised` on
+             * Linux, 5 runs out of 5, with this file at HEAD.  f0dc8edb sat in
+             * main underneath 6b378681, and 24e23f78 went green because it
+             * restored the drain to 405bf98c, which took f0dc8edb out too.
+             * Nothing about the ARMED claim was ever load-bearing.  Claiming AND
+             * delivering satisfies either reading regardless. */
+            if (cur == RUNLOOM_PARK_WOKEN) continue;
             if (dbg)
-                fprintf(stderr, "[sigwake] WOKE fd=%d events=%d | seen=%d parked=%d armed=%d woken=%d\n",
-                        p->fd, p->events, seen, parked, armed, woken);
+                fprintf(stderr, "[sigwake] WOKE fd=%d events=%d cur=%s | seen=%d parked=%d armed=%d woken=%d\n",
+                        p->fd, p->events,
+                        cur == RUNLOOM_PARK_PARKED ? "PARKED" : "ARMED",
+                        seen, parked, armed, woken);
             if (p->ready_out != NULL) *p->ready_out = RUNLOOM_NETPOLL_SIGNALED;
             runloom_parker_unlink(pool, p);
-            if (p->hub != NULL) runloom_mn_wake_g(p->hub, p->g);
-            else                runloom_sched_wake(p->g);
+            /* ARMED: never yielded, so there is nothing to re-queue -- it is
+             * still running and will see the sentinel on its abort path. */
+            if (cur == RUNLOOM_PARK_PARKED) {
+                if (p->hub != NULL) runloom_mn_wake_g(p->hub, p->g);
+                else                runloom_sched_wake(p->g);
+            }
             RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
             return 1;
         }
@@ -214,6 +344,32 @@ int runloom_netpoll_signal_wake(void)
         fprintf(stderr, "[sigwake] NONE | seen=%d parked=%d armed=%d woken=%d wrong_owner=%d\n",
                 seen, parked, armed, woken, wrong_owner);
     return 0;
+}
+
+/* The scheduler handed this fiber a raised Python signal-handler exception
+ * (Ctrl-C -> KeyboardInterrupt, an alarm handler, ...): it ran the handler in
+ * its own tstate, stashed the raised exception on our owner scheduler, and
+ * marked our parker with RUNLOOM_NETPOLL_SIGNALED (runloom_netpoll_signal_wake).
+ * Restore it into THIS fiber's tstate so it propagates out of the cooperative
+ * blocking call (recv/accept/select/...) through this fiber's own stack, where
+ * its try/except sees it, instead of out of run().  Callers treat a -1 with a
+ * Python error already set as "propagate", not OSError.
+ *
+ * Called from BOTH of wait_fd's returns -- the post-park one and the aborted-
+ * park one.  The abort path needs it because a signal can be delivered to a
+ * parker that is still ARMED, i.e. to a fiber that never yielded; it fails its
+ * commit CAS and must carry the exception out from there. */
+static void runloom_netpoll_take_signal(runloom_g_t *current_g,
+                                        runloom_sched_t *s)
+{
+    runloom_sched_t *owner = (current_g != NULL) ? current_g->owner : s;
+    PyObject *exc = (owner != NULL) ? owner->signal_exc : NULL;
+    if (owner != NULL) owner->signal_exc = NULL;
+    if (exc != NULL) {
+        PyObject *tb = PyException_GetTraceback(exc);   /* new ref or NULL */
+        /* PyErr_Restore steals all three refs. */
+        PyErr_Restore((PyObject *)Py_NewRef(Py_TYPE(exc)), exc, tb);
+    }
 }
 
 /* ---- park / wake ---- */
@@ -576,6 +732,13 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
         }
     }
 
+#if defined(SIGALRM)
+    /* Test-only fault site: the parker is linked and ARMED, the commit CAS has
+     * not run yet.  See runloom_sigwake_at_arm_inject above. */
+    if (runloom_sigwake_at_arm_hit())
+        runloom_sigwake_at_arm_inject(current_g, s);
+#endif
+
     /* Commit to parking (Go netpollblockcommit).  CAS commit ARMED->
      * PARKED.  If it fails, a pump has already claimed this parker
      * (commit == WOKEN): it recorded readiness into ready_mask and
@@ -604,6 +767,16 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
             if (current_g != NULL && current_g->netpoll_parker == park)
                 current_g->netpoll_parker = NULL;
             runloom_parker_pool_release(park);
+            /* A signal claimed this parker while it was ARMED: it never yielded,
+             * so the delivery lands HERE rather than after the park.  Without
+             * this the sentinel went back to the caller RAW -- a bare
+             * 0x20000000 with a Python error dangling, which recv/send_all/
+             * connect read as "some events are ready" and CPython then reported
+             * as "returned a result with an exception set". */
+            if (ready_mask == RUNLOOM_NETPOLL_SIGNALED) {
+                runloom_netpoll_take_signal(current_g, s);
+                return -1;
+            }
             /* Reap/drain cancellation (ready_out = -1): set a DEFINED errno -- the
      * drains cannot set the parker thread's errno, and returning -1 with
      * stale errno made PyErr_SetFromErrno surface RANDOM OSError subclasses
@@ -674,14 +847,7 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
      * -- where its try/except sees it -- instead of out of run().  Callers treat
      * a -1 with a Python error already set as "propagate", not OSError. */
     if (ready_mask == RUNLOOM_NETPOLL_SIGNALED) {
-        runloom_sched_t *owner = (current_g != NULL) ? current_g->owner : s;
-        PyObject *exc = (owner != NULL) ? owner->signal_exc : NULL;
-        if (owner != NULL) owner->signal_exc = NULL;
-        if (exc != NULL) {
-            PyObject *tb = PyException_GetTraceback(exc);   /* new ref or NULL */
-            /* PyErr_Restore steals all three refs. */
-            PyErr_Restore((PyObject *)Py_NewRef(Py_TYPE(exc)), exc, tb);
-        }
+        runloom_netpoll_take_signal(current_g, s);
         return -1;
     }
     /* Reap/drain cancellation (ready_out = -1): set a DEFINED errno -- the
