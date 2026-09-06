@@ -289,6 +289,40 @@ def needs_free_threading():
     return hasattr(sys, "_is_gil_enabled") and not sys._is_gil_enabled()
 
 
+def ensure_fd_budget(n, what="this test"):
+    """Raise the soft RLIMIT_NOFILE to cover `n` descriptors, or skip.
+
+    macOS ships a soft limit of 256 with an effectively unlimited hard limit
+    (capped by kern.maxfilesperproc, 10240 on the CI box), so a test wanting a
+    few hundred socketpairs dies with EMFILE on a stock mac while passing on
+    Linux, where the soft default is 1024+.  That is an environment
+    assumption, not a runtime bug, and it is invisible in the failure -- the
+    traceback points at socket.socketpair(), several frames from anything the
+    test is actually about.
+
+    Raising the SOFT limit toward the hard one needs no privileges; it is
+    exactly what `ulimit -n` does.  Restoring is deliberately NOT attempted:
+    lowering it again could break an unrelated later test in the same
+    interpreter, and a higher soft limit harms nothing.
+    """
+    try:
+        import resource
+    except ImportError:                      # pragma: no cover - Windows
+        return
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft >= n:
+        return
+    want = n if hard == resource.RLIM_INFINITY else min(n, hard)
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+    except (ValueError, OSError):
+        want = soft
+    if resource.getrlimit(resource.RLIMIT_NOFILE)[0] < n:
+        import pytest
+        pytest.skip("%s needs %d fds; soft RLIMIT_NOFILE is %d and could not "
+                    "be raised (hard limit %s)" % (what, n, want, hard))
+
+
 def pollable_pipe():
     """Return (rfd, wfd, keepalive) -- a pair of fds usable as a wait_fd target.
 

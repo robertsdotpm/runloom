@@ -25,7 +25,7 @@ import pytest
 
 import runloom
 import runloom_c as rc
-from adv_util import hang_guard, assert_faster_than, needs_free_threading, pollable_pipe
+from adv_util import hang_guard, assert_faster_than, needs_free_threading, pollable_pipe, ensure_fd_budget
 
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -388,6 +388,7 @@ def _wake_storm(spawn, drive, n):
 
 def test_wake_storm_single_thread():
     N = 300
+    ensure_fd_budget(2 * N + 128, "wake storm single-thread")
     with hang_guard(40, "wake storm single-thread"):
         total = _wake_storm(rc.fiber, lambda m: (rc.fiber(m), rc.run()), N)
     assert total == N, "edge-drop: only %d/%d readers woke" % (total, N)
@@ -396,6 +397,7 @@ def test_wake_storm_single_thread():
 @pytest.mark.skipif(not FT, reason="M:N needs GIL-disabled build")
 def test_wake_storm_across_mn_hubs():
     N = 400
+    ensure_fd_budget(2 * N + 128, "wake storm M:N")
     def drive(main):
         rc.mn_init(4)
         rc.mn_fiber(main)
